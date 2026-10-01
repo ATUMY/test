@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+<title>Black Russia Prototype — 3D Open World</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #87CEEB; font-family: Arial, sans-serif; }
+  canvas { display: block; }
+
+  /* Джойстик */
+  #joystick {
+    position: fixed;
+    left: 30px;
+    bottom: 30px;
+    width: 140px;
+    height: 140px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.25);
+    border: 2px solid rgba(255, 255, 255, 0.5);
+    touch-action: none;
+    user-select: none;
+    z-index: 10;
+  }
+  #stick {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 60px;
+    height: 60px;
+    margin-left: -30px;
+    margin-top: -30px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.7);
+    box-shadow: 0 0 10px rgba(0,0,0,0.3);
+    pointer-events: none;
+    transition: transform 0.05s linear;
+  }
+
+  /* HUD */
+  #hud {
+    position: fixed;
+    top: 15px;
+    left: 15px;
+    color: #fff;
+    text-shadow: 1px 1px 3px #000;
+    font-size: 14px;
+    z-index: 10;
+    line-height: 1.5;
+  }
+  #hud b { color: #FFD700; }
+
+  /* Кнопка прыжка */
+  #jumpBtn {
+    position: fixed;
+    right: 30px;
+    bottom: 40px;
+    width: 80px;
+    height: 80px;
+    border-radius: 50%;
+    background: rgba(255, 215, 0, 0.5);
+    border: 2px solid rgba(255, 255, 255, 0.7);
+    color: #fff;
+    font-size: 14px;
+    font-weight: bold;
+    text-shadow: 1px 1px 2px #000;
+    touch-action: none;
+    user-select: none;
+    z-index: 10;
+    cursor: pointer;
+  }
+  #jumpBtn:active { background: rgba(255, 215, 0, 0.9); }
+
+  #loading {
+    position: fixed;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    color: #fff;
+    font-size: 20px;
+    text-shadow: 2px 2px 4px #000;
+    z-index: 20;
+  }
+</style>
+</head>
+<body>
+
+<div id="loading">Загрузка мира...</div>
+
+<div id="hud">
+  💰 Рубли: <b id="money">0</b><br>
+  🏃 Скорость: <b id="speed">0</b> км/ч<br>
+  📍 Координаты: <b id="coords">0, 0</b>
+</div>
+
+<div id="joystick">
+  <div id="stick"></div>
+</div>
+
+<button id="jumpBtn">JUMP</button>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+
+// ========== СЦЕНА ==========
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x87CEEB);
+scene.fog = new THREE.Fog(0x87CEEB, 60, 180);
+
+const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 500);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+document.body.appendChild(renderer.domElement);
+
+// ========== СВЕТ ==========
+const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+sun.position.set(50, 80, 30);
+sun.castShadow = true;
+sun.shadow.mapSize.set(1024, 1024);
+sun.shadow.camera.left = -100;
+sun.shadow.camera.right = 100;
+sun.shadow.camera.top = 100;
+sun.shadow.camera.bottom = -100;
+scene.add(sun);
+scene.add(new THREE.AmbientLight(0x88aaff, 0.6));
+
+// ========== ЗЕМЛЯ (ТРАВА) ==========
+const groundGeo = new THREE.PlaneGeometry(400, 400, 50, 50);
+const groundMat = new THREE.MeshLambertMaterial({ color: 0x3B8C3B });
+const ground = new THREE.Mesh(groundGeo, groundMat);
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
+
+// Дороги (серые полосы)
+const roadMat = new THREE.MeshLambertMaterial({ color: 0x555555 });
+const road1 = new THREE.Mesh(new THREE.PlaneGeometry(8, 400), roadMat);
+road1.rotation.x = -Math.PI / 2;
+road1.position.y = 0.01;
+road1.receiveShadow = true;
+scene.add(road1);
+
+const road2 = new THREE.Mesh(new THREE.PlaneGeometry(400, 8), roadMat);
+road2.rotation.x = -Math.PI / 2;
+road2.position.y = 0.01;
+road2.receiveShadow = true;
+scene.add(road2);
+
+// ========== ДОМА (кубики) ==========
+const buildingColors = [0xcc4444, 0x4444cc, 0xcccc44, 0xcccccc, 0x884422];
+function spawnBuilding(x, z, w, h, d) {
+  const color = buildingColors[Math.floor(Math.random() * buildingColors.length)];
+  const b = new THREE.Mesh(
+    new THREE.BoxGeometry(w, h, d),
+    new THREE.MeshLambertMaterial({ color })
+  );
+  b.position.set(x, h / 2, z);
+  b.castShadow = true;
+  b.receiveShadow = true;
+  scene.add(b);
+}
+// Сетка зданий по карте (кроме центра)
+for (let x = -80; x <= 80; x += 30) {
+  for (let z = -80; z <= 80; z += 30) {
+    if (Math.abs(x) < 15 || Math.abs(z) < 15) continue;
+    const h = 4 + Math.random() * 12;
+    spawnBuilding(x + (Math.random() - 0.5) * 6, z + (Math.random() - 0.5) * 6, 8, h, 8);
+  }
+}
+
+// ========== ДЕРЕВЬЯ ==========
+function spawnTree(x, z) {
+  const trunk = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.3, 0.4, 2.5, 6),
+    new THREE.MeshLambertMaterial({ color: 0x6b4423 })
+  );
+  trunk.position.set(x, 1.25, z);
+  trunk.castShadow = true;
+  scene.add(trunk);
+
+  const leaves = new THREE.Mesh(
+    new THREE.SphereGeometry(1.8, 8, 8),
+    new THREE.MeshLambertMaterial({ color: 0x2d6b2d })
+  );
+  leaves.position.set(x, 3.5, z);
+  leaves.castShadow = true;
+  scene.add(leaves);
+}
+for (let i = 0; i < 40; i++) {
+  const x = (Math.random() - 0.5) * 180;
+  const z = (Math.random() - 0.5) * 180;
+  if (Math.abs(x) < 10 || Math.abs(z) < 10) continue;
+  spawnTree(x, z);
+}
+
+// ========== ПЕРСОНАЖ ==========
+const player = new THREE.Group();
+
+// Тело
+const body = new THREE.Mesh(
+  new THREE.CapsuleGeometry(0.4, 0.8, 4, 8),
+  new THREE.MeshLambertMaterial({ color: 0x2244aa })
+);
+body.position.y = 1.0;
+body.castShadow = true;
+player.add(body);
+
+// Голова
+const head = new THREE.Mesh(
+  new THREE.SphereGeometry(0.35, 16, 16),
+  new THREE.MeshLambertMaterial({ color: 0xffcc99 })
+);
+head.position.y = 1.85;
+head.castShadow = true;
+player.add(head);
+
+player.position.set(0, 0, 0);
+scene.add(player);
+
+// ========== ФИЗИКА ПЕРСОНАЖА ==========
+const playerState = {
+  velocityY: 0,
+  onGround: true,
+  speed: 0,
+  money: 0
+};
+const GRAVITY = -25;
+const MOVE_SPEED = 8;
+const JUMP_FORCE = 10;
+
+// ========== ДЖОЙСТИК ==========
+const joystickEl = document.getElementById('joystick');
+const stickEl = document.getElementById('stick');
+const input = { x: 0, y: 0 };
+let joystickActive = false;
+let joystickCenter = { x: 0, y: 0 };
+const MAX_RADIUS = 50;
+
+function startJoystick(e) {
+  joystickActive = true;
+  const rect = joystickEl.getBoundingClientRect();
+  joystickCenter = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+  moveJoystick(e);
+}
+function moveJoystick(e) {
+  if (!joystickActive) return;
+  const touch = e.touches ? e.touches[0] : e;
+  let dx = touch.clientX - joystickCenter.x;
+  let dy = touch.clientY - joystickCenter.y;
+  const dist = Math.hypot(dx, dy);
+  if (dist > MAX_RADIUS) {
+    dx = dx / dist * MAX_RADIUS;
+    dy = dy / dist * MAX_RADIUS;
+  }
+  stickEl.style.transform = `translate(${dx}px, ${dy}px)`;
+  input.x = dx / MAX_RADIUS;
+  input.y = -dy / MAX_RADIUS; // вверх = вперёд
+}
+function endJoystick() {
+  joystickActive = false;
+  stickEl.style.transform = 'translate(0, 0)';
+  input.x = 0;
+  input.y = 0;
+}
+joystickEl.addEventListener('touchstart', startJoystick, { passive: false });
+joystickEl.addEventListener('touchmove', moveJoystick, { passive: false });
+joystickEl.addEventListener('touchend', endJoystick);
+joystickEl.addEventListener('mousedown', startJoystick);
+window.addEventListener('mousemove', moveJoystick);
+window.addEventListener('mouseup', endJoystick);
+
+// Клавиатура (для ПК)
+const keys = {};
+window.addEventListener('keydown', e => keys[e.key.toLowerCase()] = true);
+window.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+
+// Прыжок
+document.getElementById('jumpBtn').addEventListener('click', () => {
+  if (playerState.onGround) {
+    playerState.velocityY = JUMP_FORCE;
+    playerState.onGround = false;
+  }
+});
+window.addEventListener('keydown', e => {
+  if (e.code === 'Space' && playerState.onGround) {
+    playerState.velocityY = JUMP_FORCE;
+    playerState.onGround = false;
+  }
+});
+
+// ========== КАМЕРА (третье лицо) ==========
+const cameraOffset = new THREE.Vector3(0, 6, 10);
+const cameraTarget = new THREE.Vector3();
+
+// ========== ИГРОВОЙ ЦИКЛ ==========
+const clock = new THREE.Clock();
+const hudMoney = document.getElementById('money');
+const hudSpeed = document.getElementById('speed');
+const hudCoords = document.getElementById('coords');
+
+// Начисление рублей за ходьбу (кликер-механика)
+let moneyTimer = 0;
+
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.1);
+
+  // Ввод: джойстик + клавиатура
+  let inX = input.x;
+  let inY = input.y;
+  if (keys['w'] || keys['arrowup']) inY = 1;
+  if (keys['s'] || keys['arrowdown']) inY = -1;
+  if (keys['a'] || keys['arrowleft']) inX = -1;
+  if (keys['d'] || keys['arrowright']) inX = 1;
+
+  // Направление движения относительно камеры
+  const camForward = new THREE.Vector3();
+  camera.getWorldDirection(camForward);
+  camForward.y = 0;
+  camForward.normalize();
+  const camRight = new THREE.Vector3().crossVectors(camForward, new THREE.Vector3(0, 1, 0)).normalize();
+
+  const moveDir = new THREE.Vector3()
+    .addScaledVector(camForward, inY)
+    .addScaledVector(camRight, inX);
+
+  const moveMag = moveDir.length();
+  if (moveMag > 0.05) {
+    moveDir.normalize();
+    player.position.addScaledVector(moveDir, MOVE_SPEED * dt);
+    // Плавный поворот персонажа
+    const targetAngle = Math.atan2(moveDir.x, moveDir.z);
+    let diff = targetAngle - player.rotation.y;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    player.rotation.y += diff * Math.min(1, dt * 12);
+    playerState.speed = MOVE_SPEED;
+  } else {
+    playerState.speed = 0;
+  }
+
+  // Гравитация и прыжок
+  playerState.velocityY += GRAVITY * dt;
+  player.position.y += playerState.velocityY * dt;
+  if (player.position.y <= 0) {
+    player.position.y = 0;
+    playerState.velocityY = 0;
+    playerState.onGround = true;
+  }
+
+  // Ограничение карты
+  player.position.x = Math.max(-190, Math.min(190, player.position.x));
+  player.position.z = Math.max(-190, Math.min(190, player.position.z));
+
+  // Камера следует за игроком
+  cameraTarget.copy(player.position).add(cameraOffset);
+  camera.position.lerp(cameraTarget, Math.min(1, dt * 5));
+  camera.lookAt(player.position.x, player.position.y + 2, player.position.z);
+
+  // Экономика: +1 рубль за каждые 0.5 сек ходьбы
+  if (playerState.speed > 0) {
+    moneyTimer += dt;
+    if (moneyTimer >= 0.5) {
+      moneyTimer = 0;
+      playerState.money += 1;
+      hudMoney.textContent = playerState.money;
+    }
+  }
+
+  // HUD
+  hudSpeed.textContent = (playerState.speed * 3.6).toFixed(0);
+  hudCoords.textContent = `${player.position.x.toFixed(0)}, ${player.position.z.toFixed(0)}`;
+
+  renderer.render(scene, camera);
+}
+
+// ========== РЕСАЙЗ ==========
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// Старт
+document.getElementById('loading').style.display = 'none';
+animate();
+</script>
+
+</body>
+</html>
