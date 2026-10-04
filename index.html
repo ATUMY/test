@@ -1,0 +1,846 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=3.0, user-scalable=yes" />
+<title>Карта маршрутов — машина по дорогам</title>
+<style>
+  :root{
+    --panel:#101418e0;
+    --panel-border:#2b3440;
+    --accent:#22c55e;
+    --accent-dark:#16a34a;
+    --text:#e8eef6;
+    --muted:#93a4b8;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+  html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#0b0f14;color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;}
+
+  #stage{position:fixed;inset:0;touch-action:none;cursor:grab;background:#0b0f14;}
+  #stage.dragging{cursor:grabbing;}
+  #world{position:absolute;top:0;left:0;transform-origin:0 0;will-change:transform;}
+
+  #baseImg{
+    position:absolute;top:0;left:0;display:block;
+    image-rendering:auto;user-select:none;-webkit-user-drag:none;pointer-events:none;
+  }
+  #overlay{position:absolute;top:0;left:0;display:block;pointer-events:none;}
+
+  #ui{
+    position:fixed;left:10px;right:10px;bottom:10px;z-index:20;
+    background:var(--panel);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+    border:1px solid var(--panel-border);border-radius:16px;padding:10px;
+    display:flex;flex-direction:column;gap:8px;box-shadow:0 8px 30px #000a;
+  }
+  #ui.collapsed .row-extra{display:none;}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
+  .row-extra{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
+
+  .btn{
+    flex:1 1 auto;min-width:84px;padding:10px 12px;border-radius:12px;border:1px solid var(--panel-border);
+    background:#1a2230;color:var(--text);font-size:13px;font-weight:600;cursor:pointer;
+    display:flex;align-items:center;justify-content:center;gap:6px;user-select:none;transition:.15s;
+  }
+  .btn:active{transform:scale(.97);}
+  .btn.on{background:var(--accent);border-color:var(--accent-dark);color:#04140a;}
+  .btn.ghost{background:#141b25;}
+  .btn.small{flex:0 0 auto;min-width:44px;padding:10px 12px;}
+
+  .field{display:flex;flex-direction:column;gap:4px;flex:1 1 140px;min-width:130px;}
+  .field label{font-size:11px;color:var(--muted);letter-spacing:.02em;}
+  select,input[type=range]{
+    width:100%;padding:9px 10px;border-radius:11px;border:1px solid var(--panel-border);
+    background:#1a2230;color:var(--text);font-size:13px;outline:none;
+  }
+  input[type=range]{padding:0;height:26px;background:transparent;border:none;}
+
+  #hud{
+    position:fixed;top:10px;left:10px;right:10px;z-index:20;display:flex;justify-content:space-between;
+    gap:8px;pointer-events:none;
+  }
+  .chip{
+    pointer-events:auto;background:var(--panel);border:1px solid var(--panel-border);border-radius:12px;
+    padding:8px 11px;font-size:12px;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+    display:flex;align-items:center;gap:8px;
+  }
+  .chip b{font-weight:700;}
+  .muted{color:var(--muted);}
+  #compass{width:38px;height:38px;border-radius:50%;border:1px solid var(--panel-border);
+    background:radial-gradient(circle at 50% 50%,#1b2430,#0f141b);display:flex;align-items:center;
+    justify-content:center;font-size:16px;}
+  #compass span{transition:transform .25s linear;display:block;}
+
+  .legend{
+    position:fixed;top:64px;left:10px;z-index:19;background:var(--panel);border:1px solid var(--panel-border);
+    border-radius:12px;padding:8px 10px;font-size:11px;display:none;backdrop-filter:blur(10px);
+  }
+  .legend.show{display:block;}
+  .legend i{display:inline-block;width:16px;height:3px;border-radius:2px;margin-right:6px;vertical-align:middle;}
+  .legend div{margin:4px 0;color:var(--muted);}
+
+  #toast{
+    position:fixed;left:50%;top:50%;transform:translate(-50%,-50%) scale(.9);z-index:30;
+    background:#0f1620f2;border:1px solid var(--panel-border);border-radius:14px;padding:14px 18px;
+    font-size:13px;text-align:center;opacity:0;pointer-events:none;transition:.25s;max-width:80vw;
+  }
+  #toast.show{opacity:1;transform:translate(-50%,-50%) scale(1);}
+  .progress{height:5px;border-radius:4px;background:#22303f;overflow:hidden;}
+  .progress > i{display:block;height:100%;width:0;background:linear-gradient(90deg,#22c55e,#86efac);transition:width .2s;}
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="world">
+    <img id="baseImg" alt="map" />
+    <canvas id="overlay"></canvas>
+  </div>
+</div>
+
+<div id="hud">
+  <div class="chip">🚗 <b id="status">Ожидание</b></div>
+  <div class="chip"><span class="muted">км/ч</span><b id="speedReadout">0</b></div>
+  <div class="chip" id="compass"><span id="needle">▲</span></div>
+</div>
+
+<div class="legend" id="legend">
+  <div><i style="background:#ffffff"></i>Главная дорога (6px)</div>
+  <div><i style="background:#ffffff;opacity:.8"></i>Дорога (4px)</div>
+  <div><i style="background:#808080"></i>Переулок (2px)</div>
+  <div><i style="background:#828282"></i>Второстепенная (2px)</div>
+</div>
+
+<div id="ui">
+  <div class="row">
+    <button class="btn" id="btnRoute">🧭 Маршрут: <b id="routeMode">Короткий</b></button>
+    <button class="btn small ghost" id="btnLegend" title="Легенда">ℹ️</button>
+    <button class="btn small ghost" id="btnCollapse" title="Свернуть">▾</button>
+  </div>
+
+  <div class="row row-extra">
+    <div class="field">
+      <label for="dest">Метка назначения</label>
+      <select id="dest"></select>
+    </div>
+    <div class="field">
+      <label for="speed">Скорость: <b id="speedVal">1.0×</b></label>
+      <input type="range" id="speed" min="0.2" max="4" step="0.1" value="1" />
+    </div>
+  </div>
+
+  <div class="row row-extra">
+    <button class="btn on" id="btnGo">▶️ Поехали</button>
+    <button class="btn ghost" id="btnPause" disabled>⏸ Пауза</button>
+    <button class="btn ghost" id="btnReset">⟲ Сброс</button>
+  </div>
+
+  <div class="row row-extra" style="flex-direction:column;align-items:stretch;">
+    <div class="progress"><i id="bar"></i></div>
+    <div class="muted" style="font-size:11px;" id="progressText">Прогресс: 0%</div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+/* ============================================================
+   КАРТИНКА КАРТЫ
+   ============================================================ */
+const MAP_IMG_URL = "https://raw.githubusercontent.com/ATUMY/test/main/images/maps.png";
+
+/* ============================================================
+   ДОРОГИ (координаты из map_project_*.json)
+   ============================================================ */
+const ROADS = [
+{"id":1,"width":6,"color":"#ffffff","points":[{"x":2675,"y":50},{"x":2775,"y":50},{"x":2775,"y":500}]},
+{"id":2,"width":6,"color":"#ffffff","points":[{"x":2675,"y":50},{"x":2675,"y":625}]},
+{"id":4,"width":6,"color":"#ffffff","points":[{"x":2575,"y":50},{"x":2625,"y":50},{"x":2650,"y":75},{"x":2650,"y":625}]},
+{"id":5,"width":6,"color":"#ffffff","points":[{"x":2575,"y":50},{"x":2575,"y":100},{"x":2375,"y":100}]},
+{"id":6,"width":6,"color":"#ffffff","points":[{"x":2400,"y":100},{"x":2400,"y":50},{"x":2325,"y":50},{"x":2300,"y":75},{"x":2300,"y":250},{"x":2275,"y":300},{"x":2275,"y":625}]},
+{"id":7,"width":6,"color":"#ffffff","points":[{"x":2250,"y":625},{"x":2250,"y":300},{"x":2275,"y":250},{"x":2275,"y":75},{"x":2250,"y":50},{"x":2125,"y":50}]},
+{"id":8,"width":6,"color":"#ffffff","points":[{"x":2675,"y":625},{"x":2725,"y":625},{"x":2750,"y":600},{"x":2775,"y":550},{"x":2775,"y":500}]},
+{"id":9,"width":6,"color":"#ffffff","points":[{"x":2125,"y":25},{"x":2125,"y":200},{"x":2275,"y":200}]},
+{"id":12,"width":6,"color":"#ffffff","points":[{"x":2125,"y":50},{"x":2100,"y":75},{"x":1875,"y":75},{"x":1875,"y":150},{"x":2125,"y":150}]},
+{"id":13,"width":6,"color":"#ffffff","points":[{"x":1900,"y":150},{"x":1900,"y":225},{"x":2050,"y":225},{"x":2100,"y":225},{"x":2125,"y":200}]},
+{"id":25,"width":6,"color":"#ffffff","points":[{"x":2650,"y":625},{"x":2275,"y":625}]},
+{"id":27,"width":6,"color":"#ffffff","points":[{"x":1900,"y":225},{"x":1900,"y":425},{"x":1925,"y":500},{"x":1975,"y":550},{"x":2050,"y":600},{"x":2100,"y":625},{"x":2250,"y":625}]},
+{"id":29,"width":6,"color":"#ffffff","points":[{"x":2725,"y":625},{"x":2700,"y":650},{"x":2125,"y":650},{"x":2100,"y":650},{"x":2050,"y":625},{"x":1975,"y":575},{"x":1925,"y":550},{"x":1900,"y":550},{"x":1850,"y":575},{"x":1825,"y":625}]},
+{"id":30,"width":6,"color":"#ffffff","points":[{"x":1900,"y":225},{"x":1875,"y":250},{"x":1875,"y":425},{"x":1900,"y":500},{"x":1875,"y":525},{"x":1825,"y":550},{"x":1775,"y":625}]},
+{"id":32,"width":4,"color":"#ffffff","points":[{"x":2425,"y":100},{"x":2425,"y":225},{"x":2300,"y":225}]},
+{"id":33,"width":4,"color":"#ffffff","points":[{"x":2425,"y":175},{"x":2550,"y":175},{"x":2550,"y":250},{"x":2650,"y":250}]},
+{"id":34,"width":4,"color":"#ffffff","points":[{"x":2275,"y":325},{"x":2475,"y":325},{"x":2475,"y":425},{"x":2325,"y":425},{"x":2325,"y":525},{"x":2375,"y":525},{"x":2400,"y":500},{"x":2475,"y":500},{"x":2475,"y":550},{"x":2450,"y":575},{"x":2300,"y":575}]},
+{"id":35,"width":4,"color":"#ffffff","points":[{"x":2650,"y":300},{"x":2525,"y":300},{"x":2525,"y":425},{"x":2575,"y":475},{"x":2650,"y":475}]},
+{"id":36,"width":4,"color":"#ffffff","points":[{"x":2650,"y":550},{"x":2525,"y":550},{"x":2500,"y":575},{"x":2500,"y":625}]},
+{"id":37,"width":2,"color":"#808080","points":[{"x":2300,"y":175},{"x":2350,"y":175},{"x":2350,"y":150},{"x":2425,"y":150}]},
+{"id":101,"width":2,"color":"#808080","points":[{"x":2300,"y":125},{"x":2350,"y":125},{"x":2350,"y":50}]},
+{"id":102,"width":2,"color":"#808080","points":[{"x":2425,"y":125},{"x":2475,"y":125},{"x":2475,"y":150},{"x":2500,"y":150},{"x":2525,"y":125}]},
+{"id":103,"width":2,"color":"#808080","points":[{"x":2475,"y":175},{"x":2475,"y":250},{"x":2475,"y":275}]},
+{"id":104,"width":2,"color":"#808080","points":[{"x":2350,"y":225},{"x":2350,"y":325}]},
+{"id":105,"width":2,"color":"#808080","points":[{"x":2425,"y":325},{"x":2425,"y":275},{"x":2400,"y":275}]},
+{"id":106,"width":2,"color":"#808080","points":[{"x":2575,"y":625},{"x":2575,"y":575},{"x":2625,"y":575}]},
+{"id":107,"width":2,"color":"#808080","points":[{"x":2575,"y":575},{"x":2525,"y":575}]},
+{"id":108,"width":2,"color":"#808080","points":[{"x":2375,"y":425},{"x":2375,"y":375},{"x":2300,"y":375}]},
+{"id":109,"width":2,"color":"#808080","points":[{"x":2375,"y":375},{"x":2450,"y":375}]},
+{"id":110,"width":2,"color":"#808080","points":[{"x":2650,"y":375},{"x":2575,"y":375},{"x":2575,"y":350},{"x":2575,"y":325},{"x":2625,"y":325}]},
+{"id":111,"width":2,"color":"#808080","points":[{"x":2650,"y":400},{"x":2575,"y":400},{"x":2575,"y":450},{"x":2625,"y":450}]},
+{"id":112,"width":6,"color":"#ffffff","points":[{"x":2675,"y":375},{"x":2650,"y":375}]},
+{"id":113,"width":6,"color":"#ffffff","points":[{"x":2275,"y":375},{"x":2250,"y":375}]},
+{"id":114,"width":6,"color":"#ffffff","points":[{"x":1900,"y":375},{"x":1875,"y":375}]},
+{"id":116,"width":4,"color":"#ffffff","points":[{"x":2525,"y":375},{"x":2475,"y":375}]},
+{"id":117,"width":4,"color":"#ffffff","points":[{"x":2250,"y":375},{"x":2150,"y":375},{"x":2125,"y":350},{"x":2125,"y":200}]},
+{"id":120,"width":4,"color":"#ffffff","points":[{"x":2175,"y":375},{"x":2175,"y":500},{"x":2250,"y":500}]},
+{"id":121,"width":4,"color":"#ffffff","points":[{"x":2025,"y":375},{"x":2025,"y":450},{"x":2025,"y":475},{"x":2000,"y":500},{"x":1925,"y":500}]},
+{"id":122,"width":4,"color":"#ffffff","points":[{"x":1900,"y":375},{"x":2100,"y":375},{"x":2125,"y":350}]},
+{"id":123,"width":4,"color":"#ffffff","points":[{"x":2775,"y":500},{"x":2725,"y":500}]},
+{"id":124,"width":4,"color":"#ffffff","points":[{"x":2775,"y":375},{"x":2725,"y":375}]},
+{"id":125,"width":4,"color":"#ffffff","points":[{"x":2775,"y":250},{"x":2725,"y":250}]},
+{"id":126,"width":4,"color":"#ffffff","points":[{"x":2775,"y":125},{"x":2725,"y":125}]},
+{"id":127,"width":2,"color":"#808080","points":[{"x":2250,"y":450},{"x":2200,"y":450}]},
+{"id":128,"width":2,"color":"#808080","points":[{"x":2200,"y":200},{"x":2200,"y":300},{"x":2150,"y":300}]},
+{"id":129,"width":2,"color":"#808080","points":[{"x":2200,"y":250},{"x":2250,"y":250}]},
+{"id":130,"width":2,"color":"#808080","points":[{"x":2275,"y":125},{"x":2200,"y":125},{"x":2200,"y":75}]},
+{"id":131,"width":2,"color":"#808080","points":[{"x":2125,"y":150},{"x":2175,"y":150},{"x":2175,"y":175}]},
+{"id":133,"width":2,"color":"#808080","points":[{"x":2125,"y":275},{"x":2050,"y":275},{"x":2025,"y":250},{"x":1950,"y":250}]},
+{"id":134,"width":2,"color":"#808080","points":[{"x":1975,"y":375},{"x":1975,"y":325},{"x":2050,"y":325}]},
+{"id":135,"width":2,"color":"#808080","points":[{"x":1900,"y":300},{"x":1975,"y":300}]},
+{"id":136,"width":2,"color":"#808080","points":[{"x":2025,"y":425},{"x":1950,"y":425},{"x":1950,"y":475}]},
+{"id":137,"width":2,"color":"#808080","points":[{"x":2250,"y":550},{"x":2125,"y":550},{"x":2125,"y":425},{"x":2075,"y":425}]},
+{"id":138,"width":2,"color":"#808080","points":[{"x":2075,"y":425},{"x":2075,"y":500},{"x":2050,"y":525},{"x":2000,"y":525},{"x":2000,"y":550},{"x":2075,"y":550},{"x":2100,"y":575},{"x":2125,"y":575},{"x":2250,"y":575}]},
+{"id":144,"width":6,"color":"#ffffff","points":[{"x":2275,"y":650},{"x":2275,"y":700},{"x":2250,"y":750},{"x":2200,"y":800},{"x":2175,"y":850},{"x":2175,"y":900}]},
+{"id":145,"width":6,"color":"#ffffff","points":[{"x":2250,"y":650},{"x":2250,"y":700},{"x":2225,"y":750},{"x":2175,"y":800},{"x":2150,"y":850},{"x":2150,"y":900}]},
+{"id":147,"width":6,"color":"#ffffff","points":[{"x":2175,"y":900},{"x":2225,"y":900},{"x":2300,"y":875},{"x":2425,"y":850},{"x":2550,"y":825},{"x":2625,"y":825},{"x":2700,"y":850},{"x":2775,"y":900},{"x":2800,"y":950},{"x":2800,"y":1125},{"x":2800,"y":1375},{"x":2775,"y":1475},{"x":2750,"y":1575},{"x":2775,"y":1650},{"x":2775,"y":2000},{"x":2775,"y":2500},{"x":2775,"y":2725},{"x":2750,"y":2750},{"x":2675,"y":2775},{"x":2125,"y":2775}]},
+{"id":148,"width":6,"color":"#ffffff","points":[{"x":2150,"y":900},{"x":2125,"y":975},{"x":2125,"y":1250}]},
+{"id":150,"width":6,"color":"#ffffff","points":[{"x":2125,"y":1250},{"x":2075,"y":1275},{"x":2000,"y":1300},{"x":1925,"y":1325},{"x":1850,"y":1375},{"x":1800,"y":1450},{"x":1750,"y":1525},{"x":1750,"y":1750}]},
+{"id":151,"width":6,"color":"#ffffff","points":[{"x":2125,"y":1250},{"x":2175,"y":1300},{"x":2275,"y":1375},{"x":2300,"y":1425},{"x":2300,"y":1500},{"x":2325,"y":1575},{"x":2375,"y":1625},{"x":2475,"y":1725},{"x":2600,"y":1750},{"x":2775,"y":1750}]},
+{"id":155,"width":6,"color":"#ffffff","points":[{"x":2475,"y":1725},{"x":2475,"y":1825},{"x":2500,"y":1825},{"x":2500,"y":1875},{"x":2550,"y":1875},{"x":2550,"y":1850},{"x":2575,"y":1850},{"x":2575,"y":1800},{"x":2575,"y":1775},{"x":2525,"y":1775},{"x":2525,"y":1825},{"x":2500,"y":1825}]},
+{"id":156,"width":6,"color":"#ffffff","points":[{"x":2475,"y":1800},{"x":2450,"y":1800},{"x":2450,"y":1775},{"x":2425,"y":1775},{"x":2425,"y":1850},{"x":2450,"y":1850},{"x":2450,"y":1825},{"x":2450,"y":1800}]},
+{"id":158,"width":6,"color":"#ffffff","points":[{"x":2525,"y":1825},{"x":2775,"y":1825}]},
+{"id":159,"width":6,"color":"#ffffff","points":[{"x":2425,"y":1875},{"x":2125,"y":1875},{"x":2025,"y":1850},{"x":1950,"y":1825},{"x":1850,"y":1800},{"x":1775,"y":1800},{"x":1750,"y":1800},{"x":1750,"y":1750}]},
+{"id":163,"width":6,"color":"#ffffff","points":[{"x":1750,"y":1800},{"x":1750,"y":2625},{"x":1775,"y":2675},{"x":1850,"y":2750},{"x":1925,"y":2775},{"x":2125,"y":2775}]},
+{"id":201,"width":6,"color":"#ffffff","points":[{"x":2775,"y":2375},{"x":2375,"y":2375},{"x":2325,"y":2400}]},
+{"id":203,"width":6,"color":"#ffffff","points":[{"x":2325,"y":2400},{"x":2325,"y":2500}]},
+{"id":204,"width":6,"color":"#ffffff","points":[{"x":2325,"y":2475},{"x":2275,"y":2475},{"x":2250,"y":2500},{"x":2250,"y":2775}]},
+{"id":205,"width":6,"color":"#ffffff","points":[{"x":2325,"y":2425},{"x":2275,"y":2400},{"x":2225,"y":2400},{"x":2175,"y":2375},{"x":2100,"y":2350},{"x":2000,"y":2325},{"x":1750,"y":2325}]},
+{"id":206,"width":6,"color":"#ffffff","points":[{"x":2750,"y":2375},{"x":2725,"y":2400},{"x":2575,"y":2400},{"x":2550,"y":2425},{"x":2550,"y":2550},{"x":2525,"y":2600},{"x":2525,"y":2775}]},
+{"id":207,"width":6,"color":"#ffffff","points":[{"x":2375,"y":2375},{"x":2400,"y":2400},{"x":2500,"y":2400},{"x":2525,"y":2425},{"x":2525,"y":2550},{"x":2500,"y":2600},{"x":2500,"y":2775}]},
+{"id":208,"width":6,"color":"#ffffff","points":[{"x":2775,"y":2450},{"x":2725,"y":2450},{"x":2700,"y":2475},{"x":2700,"y":2500},{"x":2550,"y":2500}]},
+{"id":209,"width":6,"color":"#ffffff","points":[{"x":2325,"y":2475},{"x":2525,"y":2475}]},
+{"id":210,"width":4,"color":"#ffffff","points":[{"x":2650,"y":2500},{"x":2650,"y":2625},{"x":2525,"y":2625}]},
+{"id":211,"width":4,"color":"#ffffff","points":[{"x":2425,"y":2475},{"x":2425,"y":2575},{"x":2450,"y":2600},{"x":2475,"y":2625},{"x":2500,"y":2625}]},
+{"id":212,"width":4,"color":"#ffffff","points":[{"x":2250,"y":2575},{"x":2350,"y":2575},{"x":2350,"y":2675},{"x":2400,"y":2700},{"x":2500,"y":2700}]},
+{"id":213,"width":4,"color":"#ffffff","points":[{"x":2600,"y":2625},{"x":2600,"y":2700},{"x":2675,"y":2700},{"x":2700,"y":2700},{"x":2700,"y":2625},{"x":2775,"y":2625}]},
+{"id":214,"width":4,"color":"#ffffff","points":[{"x":2250,"y":2525},{"x":2050,"y":2525},{"x":2025,"y":2500},{"x":2000,"y":2500},{"x":2000,"y":2325}]},
+{"id":215,"width":4,"color":"#ffffff","points":[{"x":1875,"y":2325},{"x":1875,"y":2500},{"x":1750,"y":2500}]},
+{"id":216,"width":4,"color":"#ffffff","points":[{"x":1875,"y":2450},{"x":1950,"y":2450},{"x":1950,"y":2575},{"x":2000,"y":2625},{"x":2000,"y":2775}]},
+{"id":217,"width":4,"color":"#ffffff","points":[{"x":2000,"y":2675},{"x":1875,"y":2675},{"x":1875,"y":2625},{"x":1750,"y":2625}]},
+{"id":218,"width":4,"color":"#ffffff","points":[{"x":1800,"y":2500},{"x":1800,"y":2575}]},
+{"id":219,"width":4,"color":"#ffffff","points":[{"x":1750,"y":2425},{"x":1825,"y":2425}]},
+{"id":220,"width":4,"color":"#ffffff","points":[{"x":2125,"y":2525},{"x":2125,"y":2425},{"x":2050,"y":2425}]},
+{"id":221,"width":4,"color":"#ffffff","points":[{"x":2125,"y":2475},{"x":2225,"y":2475},{"x":2225,"y":2425}]},
+{"id":222,"width":4,"color":"#ffffff","points":[{"x":2125,"y":2775},{"x":2125,"y":2625},{"x":2075,"y":2600},{"x":2050,"y":2600},{"x":2050,"y":2700},{"x":2000,"y":2700}]},
+{"id":223,"width":6,"color":"#ffffff","points":[{"x":1950,"y":1825},{"x":1950,"y":1875},{"x":1900,"y":1925},{"x":1825,"y":1950},{"x":1750,"y":1950}]},
+{"id":224,"width":2,"color":"#828282","points":[{"x":2250,"y":2675},{"x":2300,"y":2675},{"x":2300,"y":2725}]},
+{"id":225,"width":2,"color":"#828282","points":[{"x":2300,"y":2575},{"x":2300,"y":2625}]},
+{"id":226,"width":2,"color":"#828282","points":[{"x":2425,"y":2700},{"x":2425,"y":2650},{"x":2400,"y":2600},{"x":2375,"y":2575},{"x":2375,"y":2525},{"x":2300,"y":2525}]},
+{"id":227,"width":2,"color":"#828282","points":[{"x":2525,"y":2700},{"x":2575,"y":2700}]},
+{"id":228,"width":2,"color":"#828282","points":[{"x":2625,"y":2775},{"x":2625,"y":2725},{"x":2700,"y":2725},{"x":2725,"y":2700},{"x":2725,"y":2650}]},
+{"id":229,"width":2,"color":"#828282","points":[{"x":2775,"y":2550},{"x":2700,"y":2550},{"x":2700,"y":2600}]},
+{"id":230,"width":2,"color":"#828282","points":[{"x":2650,"y":2700},{"x":2650,"y":2650}]},
+{"id":231,"width":2,"color":"#828282","points":[{"x":2575,"y":2625},{"x":2575,"y":2575},{"x":2600,"y":2575},{"x":2600,"y":2525}]},
+{"id":232,"width":2,"color":"#828282","points":[{"x":2425,"y":2525},{"x":2475,"y":2525},{"x":2475,"y":2575}]},
+{"id":233,"width":2,"color":"#828282","points":[{"x":2425,"y":2475},{"x":2425,"y":2425},{"x":2375,"y":2425}]},
+{"id":234,"width":2,"color":"#828282","points":[{"x":2425,"y":2450},{"x":2475,"y":2450}]},
+{"id":235,"width":2,"color":"#828282","points":[{"x":2400,"y":2775},{"x":2400,"y":2725},{"x":2350,"y":2725}]},
+{"id":236,"width":2,"color":"#828282","points":[{"x":2400,"y":2750},{"x":2450,"y":2750},{"x":2450,"y":2725}]},
+{"id":237,"width":2,"color":"#828282","points":[{"x":2625,"y":2400},{"x":2625,"y":2450},{"x":2675,"y":2450}]},
+{"id":238,"width":2,"color":"#828282","points":[{"x":2625,"y":2425},{"x":2600,"y":2425},{"x":2600,"y":2450},{"x":2600,"y":2475}]},
+{"id":239,"width":2,"color":"#828282","points":[{"x":1800,"y":2325},{"x":1800,"y":2400}]},
+{"id":240,"width":2,"color":"#828282","points":[{"x":2000,"y":2400},{"x":1925,"y":2400},{"x":1925,"y":2350}]},
+{"id":241,"width":2,"color":"#828282","points":[{"x":1975,"y":2400},{"x":1975,"y":2525}]},
+{"id":242,"width":2,"color":"#828282","points":[{"x":2000,"y":2450},{"x":2075,"y":2450},{"x":2075,"y":2500}]},
+{"id":243,"width":2,"color":"#828282","points":[{"x":2175,"y":2475},{"x":2175,"y":2425},{"x":2150,"y":2400},{"x":2100,"y":2375},{"x":2025,"y":2375}]},
+{"id":244,"width":2,"color":"#828282","points":[{"x":2075,"y":2375},{"x":2075,"y":2400}]},
+{"id":245,"width":2,"color":"#828282","points":[{"x":1925,"y":2675},{"x":1925,"y":2600},{"x":1875,"y":2600},{"x":1875,"y":2550}]},
+{"id":246,"width":2,"color":"#828282","points":[{"x":1875,"y":2575},{"x":1825,"y":2575}]},
+{"id":247,"width":2,"color":"#828282","points":[{"x":1950,"y":2525},{"x":1900,"y":2525}]},
+{"id":248,"width":2,"color":"#828282","points":[{"x":1950,"y":2675},{"x":1950,"y":2725},{"x":1875,"y":2725}]},
+{"id":249,"width":2,"color":"#828282","points":[{"x":2250,"y":2650},{"x":2175,"y":2650},{"x":2175,"y":2750}]},
+{"id":250,"width":2,"color":"#828282","points":[{"x":2175,"y":2700},{"x":2225,"y":2700}]},
+{"id":251,"width":2,"color":"#828282","points":[{"x":2200,"y":2650},{"x":2200,"y":2575},{"x":2100,"y":2575},{"x":2050,"y":2550},{"x":2000,"y":2550}]},
+{"id":252,"width":6,"color":"#828282","points":[{"x":2775,"y":1975},{"x":2750,"y":2000},{"x":2700,"y":2025},{"x":2625,"y":2025},{"x":2550,"y":2025},{"x":2500,"y":2050},{"x":2450,"y":2100},{"x":2375,"y":2150},{"x":2300,"y":2175},{"x":2250,"y":2150},{"x":2225,"y":2100},{"x":2250,"y":2050},{"x":2325,"y":2025}]},
+{"id":253,"width":6,"color":"#828282","points":[{"x":2450,"y":2100},{"x":2475,"y":2150},{"x":2525,"y":2175},{"x":2600,"y":2200},{"x":2650,"y":2200},{"x":2700,"y":2175},{"x":2750,"y":2150},{"x":2775,"y":2125}]},
+{"id":254,"width":2,"color":"#828282","points":[{"x":2300,"y":2175},{"x":2300,"y":2225},{"x":2275,"y":2250},{"x":2225,"y":2300},{"x":2200,"y":2350},{"x":2175,"y":2375}]},
+{"id":255,"width":2,"color":"#828282","points":[{"x":2250,"y":2150},{"x":2200,"y":2175},{"x":2125,"y":2150},{"x":2075,"y":2100},{"x":2000,"y":2075}]},
+{"id":258,"width":6,"color":"#ffffff","points":[{"x":2425,"y":1875},{"x":2425,"y":1850}]},
+{"id":301,"width":2,"color":"#808080","points":[{"x":1925,"y":75},{"x":1925,"y":100},{"x":2050,"y":100},{"x":2050,"y":125}]},
+{"id":302,"width":2,"color":"#808080","points":[{"x":1975,"y":100},{"x":1975,"y":125}]},
+{"id":303,"width":2,"color":"#808080","points":[{"x":2075,"y":225},{"x":2075,"y":175},{"x":1950,"y":175}]},
+{"id":304,"width":2,"color":"#808080","points":[{"x":2000,"y":175},{"x":2000,"y":200},{"x":1925,"y":200}]},
+{"id":305,"width":6,"color":"#ffffff","points":[{"x":1825,"y":625},{"x":1800,"y":675}]},
+{"id":306,"width":6,"color":"#ffffff","points":[{"x":1825,"y":750},{"x":1800,"y":675},{"x":1775,"y":625},{"x":1750,"y":600},{"x":1725,"y":575},{"x":1700,"y":550},{"x":1675,"y":500},{"x":1625,"y":425},{"x":1550,"y":325},{"x":1500,"y":275},{"x":1475,"y":225},{"x":1450,"y":150},{"x":1400,"y":100},{"x":1325,"y":75},{"x":1250,"y":50},{"x":1175,"y":50},{"x":1000,"y":50}]},
+{"id":307,"width":6,"color":"#ffffff","points":[{"x":1825,"y":750},{"x":1850,"y":800},{"x":1900,"y":875},{"x":1925,"y":950},{"x":1925,"y":975},{"x":1900,"y":1025},{"x":1850,"y":1075},{"x":1775,"y":1150},{"x":1700,"y":1250},{"x":1575,"y":1375},{"x":1500,"y":1475},{"x":1325,"y":1650},{"x":1275,"y":1725},{"x":1225,"y":1850},{"x":1175,"y":1925},{"x":1075,"y":2000},{"x":950,"y":2050},{"x":750,"y":2125},{"x":575,"y":2175},{"x":375,"y":2200},{"x":250,"y":2200},{"x":125,"y":2200},{"x":75,"y":2175},{"x":25,"y":2125}]},
+{"id":401,"width":6,"color":"#ffffff","points":[{"x":1775,"y":1150},{"x":1750,"y":1125},{"x":1700,"y":1100},{"x":1700,"y":1025},{"x":1675,"y":1000},{"x":1575,"y":1000},{"x":1575,"y":1075},{"x":1700,"y":1075}]},
+{"id":402,"width":6,"color":"#ffffff","points":[{"x":1575,"y":1000},{"x":1575,"y":950},{"x":1625,"y":950},{"x":1625,"y":1000}]},
+{"id":403,"width":6,"color":"#ffffff","points":[{"x":1650,"y":1075},{"x":1650,"y":1150},{"x":1600,"y":1175},{"x":1525,"y":1175},{"x":1500,"y":1150},{"x":1500,"y":1075},{"x":1475,"y":1050},{"x":1475,"y":1025},{"x":1450,"y":1000},{"x":1450,"y":975},{"x":1575,"y":975}]},
+{"id":404,"width":6,"color":"#ffffff","points":[{"x":1450,"y":1025},{"x":1450,"y":1050},{"x":1475,"y":1075},{"x":1475,"y":1125},{"x":1375,"y":1125},{"x":1375,"y":1025},{"x":1450,"y":1025}]},
+{"id":405,"width":6,"color":"#ffffff","points":[{"x":1475,"y":1125},{"x":1500,"y":1125}]},
+{"id":406,"width":3,"color":"#ffffff","points":[{"x":1650,"y":1000},{"x":1650,"y":1075}]},
+{"id":407,"width":3,"color":"#ffffff","points":[{"x":1650,"y":1100},{"x":1575,"y":1100},{"x":1575,"y":1175}]},
+{"id":408,"width":3,"color":"#ffffff","points":[{"x":1475,"y":1050},{"x":1550,"y":1050},{"x":1550,"y":975}]},
+{"id":409,"width":3,"color":"#ffffff","points":[{"x":1425,"y":1125},{"x":1425,"y":1075},{"x":1375,"y":1075}]},
+{"id":410,"width":2,"color":"#808080","points":[{"x":1425,"y":1025},{"x":1425,"y":1050},{"x":1450,"y":1075},{"x":1450,"y":1100}]},
+{"id":411,"width":2,"color":"#808080","points":[{"x":1550,"y":1175},{"x":1550,"y":1100},{"x":1525,"y":1100},{"x":1525,"y":1075}]},
+{"id":412,"width":2,"color":"#808080","points":[{"x":1650,"y":1050},{"x":1625,"y":1050},{"x":1600,"y":1025},{"x":1575,"y":1025}]},
+{"id":413,"width":2,"color":"#808080","points":[{"x":1525,"y":975},{"x":1525,"y":1025},{"x":1500,"y":1025},{"x":1500,"y":1050}]},
+{"id":414,"width":2,"color":"#808080","points":[{"x":1650,"y":1125},{"x":1600,"y":1125},{"x":1600,"y":1150}]}
+];
+
+/* ============================================================
+   МЕТКИ
+   ============================================================ */
+const LABELS = [
+  { id:25, name:"Вокзал", x:2362.71, y:331.60 },
+  { id:27, name:"Магазин 24/7", x:2317.48, y:437.84 },
+  { id:30, name:"Оружейный магазин", x:1942.12, y:437.73 }
+];
+
+/* ============================================================
+   УТИЛИТЫ
+   ============================================================ */
+const $ = s => document.querySelector(s);
+function toast(msg, ms=1600){
+  const t=$("#toast"); t.textContent=msg; t.classList.add("show");
+  clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove("show"), ms);
+}
+const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
+
+/* ============================================================
+   СЦЕНА
+   ============================================================ */
+const stage=$("#stage"), world=$("#world");
+const baseImg=$("#baseImg"), ovC=$("#overlay");
+const octx=ovC.getContext("2d");
+
+/* Границы мира по дорогам (картинку растянем ровно в эти границы) */
+let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+for(const r of ROADS) for(const p of r.points){
+  if(p.x<minX)minX=p.x; if(p.y<minY)minY=p.y;
+  if(p.x>maxX)maxX=p.x; if(p.y>maxY)maxY=p.y;
+}
+const PAD=40;
+minX-=PAD;minY-=PAD;maxX+=PAD;maxY+=PAD;
+const WORLD_W=maxX-minX, WORLD_H=maxY-minY;
+
+/* Оверлей совпадает с миром */
+ovC.width=WORLD_W; ovC.height=WORLD_H;
+ovC.style.width=WORLD_W+"px"; ovC.style.height=WORLD_H+"px";
+
+/* Картинка растягивается ровно в границы мира */
+baseImg.style.width = WORLD_W+"px";
+baseImg.style.height= WORLD_H+"px";
+
+/* Загружаем карту */
+baseImg.crossOrigin="anonymous";
+baseImg.onload=()=>toast("Карта загружена");
+baseImg.onerror=()=>toast("Не удалось загрузить карту");
+baseImg.src=MAP_IMG_URL;
+
+/* Трансформ камеры */
+let view={scale:1,tx:0,ty:0};
+function applyView(){
+  world.style.transform=`translate(${view.tx}px,${view.ty}px) scale(${view.scale})`;
+}
+function fitToScreen(){
+  const w=stage.clientWidth, h=stage.clientHeight;
+  const s=Math.min(w/WORLD_W, h/WORLD_H)*0.98;
+  view.scale=s;
+  view.tx=(w-WORLD_W*s)/2;
+  view.ty=(h-WORLD_H*s)/2;
+  applyView();
+}
+
+/* ============================================================
+   ГРАФ ДОРОГ — с корректной склейкой и пересечениями
+   ============================================================ */
+const NODE_TOL=6;            // допуск склейки вершин
+const nodes=[];              // {x,y}
+const adjacency=new Map();   // index -> [{to, dist, roadId}]
+const nodeKey=(x,y)=>`${Math.round(x)},${Math.round(y)}`;
+const nodeIndex=new Map();   // key -> index
+
+function getOrCreateNode(x,y){
+  for(const n of nodes){
+    if(Math.abs(n.x-x)<=NODE_TOL && Math.abs(n.y-y)<=NODE_TOL) return n;
+  }
+  const n={x,y}; nodes.push(n); return n;
+}
+function ensureIndex(n){
+  const k=nodeKey(n.x,n.y);
+  if(!nodeIndex.has(k)) nodeIndex.set(k, nodeIndex.size);
+  return nodeIndex.get(k);
+}
+function addEdge(a,b,roadId){
+  const i=ensureIndex(a), j=ensureIndex(b);
+  const d=dist(a,b);
+  if(d<0.001) return;
+  if(!adjacency.has(i)) adjacency.set(i,[]);
+  if(!adjacency.has(j)) adjacency.set(j,[]);
+  adjacency.get(i).push({to:j,dist:d,roadId});
+  adjacency.get(j).push({to:i,dist:d,roadId});
+}
+
+/* Точка пересечения двух сегментов (или null) */
+function segIntersect(p1,p2,p3,p4){
+  const d=(p2.x-p1.x)*(p4.y-p3.y)-(p2.y-p1.y)*(p4.x-p3.x);
+  if(Math.abs(d)<1e-9) return null;
+  const t=((p3.x-p1.x)*(p4.y-p3.y)-(p3.y-p1.y)*(p4.x-p3.x))/d;
+  const u=((p3.x-p1.x)*(p2.y-p1.y)-(p3.y-p1.y)*(p2.x-p1.x))/d;
+  if(t<0||t>1||u<0||u>1) return null;
+  return {x:p1.x+t*(p2.x-p1.x), y:p1.y+t*(p2.y-p1.y)};
+}
+
+function buildGraph(){
+  // 1) Собираем вершины дорог
+  for(const r of ROADS){
+    let prev=null;
+    for(const p of r.points){
+      const n=getOrCreateNode(p.x,p.y);
+      ensureIndex(n);
+      if(prev) addEdge(prev,n,r.id);
+      prev=n;
+    }
+  }
+
+  // 2) Находим пересечения дорог и добавляем их как узлы
+  //    (это лечит «маршрут не найден», когда две дороги визуально пересекаются,
+  //     но в данных общей точки нет)
+  const splits=new Map(); // nodeIndex -> [{x,y}]
+  for(let i=0;i<ROADS.length;i++){
+    for(let j=i+1;j<ROADS.length;j++){
+      const A=ROADS[i], B=ROADS[j];
+      for(let ai=0; ai<A.points.length-1; ai++){
+        for(let bj=0; bj<B.points.length-1; bj++){
+          const ip=segIntersect(A.points[ai],A.points[ai+1], B.points[bj],B.points[bj+1]);
+          if(ip) {
+            // Создаём узел и «пришиваем» его к обеим дорогам через ближайшие узлы
+            const n=getOrCreateNode(ip.x, ip.y);
+            ensureIndex(n);
+            // Присоединяем к ближайшему концу обоих сегментов (в пределах дороги)
+            attachSplitsToRoad(A, ai, n);
+            attachSplitsToRoad(B, bj, n);
+          }
+        }
+      }
+    }
+  }
+  // 3) Также пришиваем «висящие» концы узлов друг к другу по допуску (быстрое перекрытие)
+  for(let i=0;i<nodes.length;i++){
+    for(let j=i+1;j<nodes.length;j++){
+      const a=nodes[i], b=nodes[j];
+      if(dist(a,b)<=NODE_TOL) addEdge(a,b, -1);
+    }
+  }
+}
+/* Аккуратно врезает узел n в дорогу r между точками index..index+1,
+   создавая рёбра от n к обоим концам сегмента. */
+function attachSplitsToRoad(r, segIdx, n){
+  const a=r.points[segIdx], b=r.points[segIdx+1];
+  const na=getOrCreateNode(a.x,a.y), nb=getOrCreateNode(b.x,b.y);
+  ensureIndex(na); ensureIndex(nb); ensureIndex(n);
+  addEdge(na, n, r.id);
+  addEdge(n, nb, r.id);
+  // на всякий случай — «мост» между a и b (закрываем шов)
+  addEdge(na, nb, r.id);
+}
+buildGraph();
+
+/* Ближайший узел к точке — просто по индексам */
+function nearestNodeIdx(x,y){
+  let bi=-1, bd=Infinity;
+  nodes.forEach((n,i)=>{
+    const key=nodeKey(n.x,n.y);
+    const idx=nodeIndex.get(key);
+    if(idx===undefined) return;
+    const d=dist(n,{x,y});
+    if(d<bd){bd=d;bi=idx;}
+  });
+  return bi;
+}
+/* Индекс -> координаты узла */
+function idxToNode(idx){
+  for(const [k,i] of nodeIndex){
+    if(i===idx){
+      const [x,y]=k.split(",").map(Number);
+      return {x,y};
+    }
+  }
+  return null;
+}
+
+/* Дейкстра */
+function dijkstra(startIdx, endIdx, mode){
+  const N=nodeIndex.size;
+  const distArr=new Array(N).fill(Infinity);
+  const prev=new Array(N).fill(-1);
+  const visited=new Array(N).fill(false);
+  distArr[startIdx]=0;
+
+  for(let it=0; it<N; it++){
+    let u=-1, best=Infinity;
+    for(let i=0;i<N;i++) if(!visited[i] && distArr[i]<best){best=distArr[i];u=i;}
+    if(u===-1) break;
+    visited[u]=true;
+    if(u===endIdx) break;
+    const edges=adjacency.get(u)||[];
+    for(const e of edges){
+      let w=e.dist;
+      if(mode==="long"){
+        const r=ROADS.find(x=>x.id===e.roadId);
+        const f = r ? (r.width>=6?0.6 : r.width>=4?1.4 : 2.6) : 1;
+        w=e.dist*f;
+      }
+      const nd=distArr[u]+w;
+      if(nd<distArr[e.to]){distArr[e.to]=nd;prev[e.to]=u;}
+    }
+  }
+  if(distArr[endIdx]===Infinity) return null;
+  const pathIdx=[];
+  let cur=endIdx;
+  while(cur!==-1){pathIdx.push(cur);cur=prev[cur];}
+  pathIdx.reverse();
+  return pathIdx.map(idxToNode).filter(Boolean);
+}
+
+/* Проекция точки на ближайшую дорогу — на случай, если метка вне узла */
+function projectToRoads(px,py){
+  let best=null;
+  for(const r of ROADS){
+    for(let i=0;i<r.points.length-1;i++){
+      const a=r.points[i], b=r.points[i+1];
+      const len2=(b.x-a.x)**2+(b.y-a.y)**2 || 1;
+      const t=Math.max(0,Math.min(1, ((px-a.x)*(b.x-a.x)+(py-a.y)*(b.y-a.y))/len2));
+      const x=a.x+t*(b.x-a.x), y=a.y+t*(b.y-a.y);
+      const d=Math.hypot(px-x,py-y);
+      if(!best || d<best.d) best={d,x,y};
+    }
+  }
+  return best;
+}
+
+/* ============================================================
+   МАШИНА
+   ============================================================ */
+const STATION = LABELS.find(L=>L.name==="Вокзал"); // 2362.71, 331.60
+
+const car={x:0,y:0,angle:0,progress:0,path:[],segIndex:0,segT:0,totalLen:0,traveled:0,moving:false,baseSpeed:120};
+let routeMode="short";
+
+/* Ставим машину НЕ на саму метку вокзала, а рядом — на ближайшую дорогу
+   к точке (Вокзал + смещение вниз-влево ~ 40px) */
+function setCarAtStart(){
+  const anchor = { x: STATION.x - 40, y: STATION.y + 40 };
+  const proj = projectToRoads(anchor.x, anchor.y);
+  if(proj){
+    car.x=proj.x; car.y=proj.y;
+  } else {
+    car.x=anchor.x; car.y=anchor.y;
+  }
+  car.angle=0; car.path=[]; car.moving=false;
+  car.traveled=0; car.progress=0; car.segIndex=0; car.segT=0; car.totalLen=0;
+}
+setCarAtStart();
+
+function recalcLength(path){
+  let L=0;
+  for(let i=0;i<path.length-1;i++) L+=dist(path[i],path[i+1]);
+  return L;
+}
+function setPath(path){
+  car.path=path; car.segIndex=0; car.segT=0; car.traveled=0;
+  car.totalLen=recalcLength(path);
+  if(path.length){
+    car.x=path[0].x; car.y=path[0].y;
+    if(path[1]) car.angle=Math.atan2(path[1].y-path[0].y, path[1].x-path[0].x);
+  }
+}
+function buildPath(destLabel){
+  // Стартовый узел — ближайший к машине
+  const startIdx = nearestNodeIdx(car.x, car.y);
+  // Конечный — сначала пробуем ближайший узел к метке
+  let endIdx = nearestNodeIdx(destLabel.x, destLabel.y);
+  let path = dijkstra(startIdx, endIdx, routeMode);
+  if(!path){
+    // фолбэк: проецируем метку на дорогу и берём узел рядом с проекцией
+    const proj = projectToRoads(destLabel.x, destLabel.y);
+    if(proj){
+      endIdx = nearestNodeIdx(proj.x, proj.y);
+      path = dijkstra(startIdx, endIdx, routeMode);
+    }
+  }
+  if(!path){
+    toast("Маршрут не найден: точки не связаны дорогами");
+    return null;
+  }
+  // Добавляем финальный «подъезд» к самой метке
+  const pts = path.map(n=>({x:n.x,y:n.y}));
+  pts.push({x:destLabel.x, y:destLabel.y});
+  return pts;
+}
+function moveCar(dt){
+  if(!car.moving || car.path.length<2) return;
+  const speed=car.baseSpeed*(parseFloat($("#speed").value));
+  let remain=speed*dt;
+  while(remain>0 && car.segIndex<car.path.length-1){
+    const a=car.path[car.segIndex], b=car.path[car.segIndex+1];
+    const segLen=dist(a,b);
+    const gone=car.segT*segLen;
+    const leftInSeg=segLen-gone;
+    if(remain<leftInSeg){
+      car.segT += remain/segLen;
+      car.traveled += remain;
+      remain=0;
+      car.x=a.x+(b.x-a.x)*car.segT;
+      car.y=a.y+(b.y-a.y)*car.segT;
+      car.angle=Math.atan2(b.y-a.y, b.x-a.x);
+    } else {
+      remain-=leftInSeg;
+      car.traveled += leftInSeg;
+      car.segIndex++;
+      car.segT=0;
+      if(car.segIndex>=car.path.length-1){
+        car.moving=false;
+        car.x=car.path[car.path.length-1].x;
+        car.y=car.path[car.path.length-1].y;
+        toast("✅ Прибыли на место!");
+        $("#status").textContent="Прибытие";
+        $("#btnPause").disabled=true;
+        $("#btnGo").classList.add("on");
+        break;
+      }
+    }
+  }
+  const pct=car.totalLen?Math.min(100, (car.traveled/car.totalLen)*100):0;
+  car.progress=pct;
+  $("#bar").style.width=pct+"%";
+  $("#progressText").textContent=`Прогресс: ${pct.toFixed(1)}%  •  ${(car.traveled/10).toFixed(0)} м / ${(car.totalLen/10).toFixed(0)} м`;
+  $("#speedReadout").textContent=(speed/2).toFixed(0);
+}
+
+/* ============================================================
+   ОТРИСОВКА ОВЕРЛЕЯ
+   ============================================================ */
+function drawOverlay(){
+  octx.clearRect(0,0,WORLD_W,WORLD_H);
+
+  if(car.path.length>1){
+    octx.lineCap="round"; octx.lineJoin="round";
+    // мягкое свечение всего маршрута
+    octx.strokeStyle="rgba(34,197,94,.28)";
+    octx.lineWidth=12;
+    octx.beginPath();
+    octx.moveTo(car.path[0].x, car.path[0].y);
+    for(let i=1;i<car.path.length;i++) octx.lineTo(car.path[i].x, car.path[i].y);
+    octx.stroke();
+
+    // пунктир маршрута
+    octx.strokeStyle="#22c55e";
+    octx.lineWidth=3;
+    octx.setLineDash([10,10]);
+    octx.beginPath();
+    octx.moveTo(car.path[0].x, car.path[0].y);
+    for(let i=1;i<car.path.length;i++) octx.lineTo(car.path[i].x, car.path[i].y);
+    octx.stroke();
+    octx.setLineDash([]);
+
+    // пройденная часть
+    octx.strokeStyle="#86efac";
+    octx.lineWidth=4;
+    octx.beginPath();
+    let acc=0;
+    octx.moveTo(car.path[0].x, car.path[0].y);
+    for(let i=0;i<car.path.length-1;i++){
+      const a=car.path[i], b=car.path[i+1];
+      const segLen=dist(a,b);
+      if(acc+segLen<=car.traveled){
+        octx.lineTo(b.x,b.y); acc+=segLen;
+      } else {
+        const t=(car.traveled-acc)/segLen;
+        octx.lineTo(a.x+(b.x-a.x)*t, a.y+(b.y-a.y)*t);
+        break;
+      }
+    }
+    octx.stroke();
+  }
+
+  // машина — зелёная галочка
+  octx.save();
+  octx.translate(car.x, car.y);
+  octx.rotate(car.angle);
+  octx.beginPath(); octx.arc(0,0,20,0,Math.PI*2);
+  octx.fillStyle="rgba(34,197,94,.18)"; octx.fill();
+  octx.beginPath();
+  octx.moveTo(16,0);
+  octx.lineTo(-10,10);
+  octx.lineTo(-5,0);
+  octx.lineTo(-10,-10);
+  octx.closePath();
+  octx.fillStyle="#22c55e";
+  octx.fill();
+  octx.lineWidth=2; octx.strokeStyle="#0b0f14"; octx.stroke();
+  // «галочка»
+  octx.beginPath();
+  octx.moveTo(-2,-1); octx.lineTo(2,4); octx.lineTo(9,-5);
+  octx.lineWidth=2.6; octx.strokeStyle="#04140a"; octx.lineCap="round"; octx.lineJoin="round";
+  octx.stroke();
+  octx.restore();
+}
+
+/* ============================================================
+   ЦИКЛ
+   ============================================================ */
+let last=performance.now();
+function loop(t){
+  const dt=Math.min(0.05,(t-last)/1000); last=t;
+  moveCar(dt);
+  drawOverlay();
+  const deg=(car.angle*180/Math.PI+90);
+  $("#needle").style.transform=`rotate(${deg}deg)`;
+  requestAnimationFrame(loop);
+}
+
+/* ============================================================
+   ПАНЫ / ЗУМ
+   ============================================================ */
+let pointers=new Map();
+let lastPan=null, pinchStart=null;
+
+stage.addEventListener("pointerdown", e=>{
+  stage.setPointerCapture(e.pointerId);
+  pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
+  if(pointers.size===1){ lastPan={x:e.clientX,y:e.clientY}; stage.classList.add("dragging"); }
+  if(pointers.size===2){
+    const [a,b]=[...pointers.values()];
+    pinchStart={d:Math.hypot(a.x-b.x,a.y-b.y), scale:view.scale};
+  }
+});
+stage.addEventListener("pointermove", e=>{
+  if(!pointers.has(e.pointerId)) return;
+  pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
+
+  if(pointers.size===1 && lastPan){
+    const dx=e.clientX-lastPan.x, dy=e.clientY-lastPan.y;
+    view.tx+=dx; view.ty+=dy;
+    lastPan={x:e.clientX,y:e.clientY};
+    applyView();
+  } else if(pointers.size===2 && pinchStart){
+    const [a,b]=[...pointers.values()];
+    const d=Math.hypot(a.x-b.x,a.y-b.y);
+    const factor=d/pinchStart.d;
+    const cx=(a.x+b.x)/2, cy=(a.y+b.y)/2;
+    const newScale=Math.max(0.15,Math.min(6, pinchStart.scale*factor));
+    const k=newScale/view.scale;
+    view.tx = cx - (cx-view.tx)*k;
+    view.ty = cy - (cy-view.ty)*k;
+    view.scale=newScale;
+    applyView();
+  }
+});
+function endPointer(e){
+  pointers.delete(e.pointerId);
+  if(pointers.size===0){ lastPan=null; stage.classList.remove("dragging"); }
+  if(pointers.size<2) pinchStart=null;
+}
+stage.addEventListener("pointerup", endPointer);
+stage.addEventListener("pointercancel", endPointer);
+
+stage.addEventListener("wheel", e=>{
+  e.preventDefault();
+  const factor=e.deltaY<0?1.1:0.9;
+  const cx=e.clientX, cy=e.clientY;
+  const k=factor;
+  view.tx = cx - (cx-view.tx)*k;
+  view.ty = cy - (cy-view.ty)*k;
+  view.scale=Math.max(0.15,Math.min(6, view.scale*k));
+  applyView();
+},{passive:false});
+
+let lastTap=0;
+stage.addEventListener("pointerup", e=>{
+  const now=Date.now();
+  if(now-lastTap<280){
+    const k=1.6, cx=e.clientX, cy=e.clientY;
+    view.tx=cx-(cx-view.tx)*k; view.ty=cy-(cy-view.ty)*k;
+    view.scale=Math.min(6,view.scale*k);
+    applyView();
+  }
+  lastTap=now;
+});
+
+/* ============================================================
+   UI
+   ============================================================ */
+function fillDestinations(){
+  const sel=$("#dest");
+  sel.innerHTML="";
+  for(const L of LABELS){
+    const o=document.createElement("option");
+    o.value=L.id; o.textContent=L.name;
+    sel.appendChild(o);
+  }
+}
+fillDestinations();
+
+$("#speed").addEventListener("input", e=>{
+  $("#speedVal").textContent=parseFloat(e.target.value).toFixed(1)+"×";
+});
+$("#btnRoute").addEventListener("click", ()=>{
+  routeMode = routeMode==="short" ? "long" : "short";
+  $("#routeMode").textContent = routeMode==="short" ? "Короткий" : "Длинный";
+  toast(routeMode==="short" ? "Короткий маршрут" : "Длинный маршрут");
+});
+$("#btnLegend").addEventListener("click", ()=>$("#legend").classList.toggle("show"));
+$("#btnCollapse").addEventListener("click", ()=>{
+  const ui=$("#ui"); ui.classList.toggle("collapsed");
+  $("#btnCollapse").textContent = ui.classList.contains("collapsed") ? "▴" : "▾";
+});
+$("#btnGo").addEventListener("click", ()=>{
+  const destId=parseInt($("#dest").value,10);
+  const destLabel=LABELS.find(L=>L.id===destId);
+  if(!destLabel){ toast("Выберите метку"); return; }
+  const path=buildPath(destLabel);
+  if(!path) return;
+  setPath(path);
+  car.moving=true;
+  $("#status").textContent="В пути → "+destLabel.name;
+  $("#btnPause").disabled=false;
+  $("#btnGo").classList.remove("on");
+  toast("Поехали!");
+});
+$("#btnPause").addEventListener("click", ()=>{
+  car.moving=!car.moving;
+  $("#btnPause").textContent = car.moving ? "⏸ Пауза" : "▶️ Продолжить";
+  $("#status").textContent = car.moving ? "В пути" : "Пауза";
+});
+$("#btnReset").addEventListener("click", ()=>{
+  setCarAtStart();
+  $("#bar").style.width="0%";
+  $("#progressText").textContent="Прогресс: 0%";
+  $("#status").textContent="Ожидание";
+  $("#btnPause").disabled=true; $("#btnPause").textContent="⏸ Пауза";
+  $("#btnGo").classList.add("on");
+  drawOverlay();
+});
+
+/* ============================================================
+   СТАРТ
+   ============================================================ */
+function boot(){
+  fitToScreen();
+  drawOverlay();
+  requestAnimationFrame(loop);
+  window.addEventListener("resize", fitToScreen);
+}
+boot();
+</script>
+</body>
+</html>
