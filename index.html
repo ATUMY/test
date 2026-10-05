@@ -1,0 +1,1138 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>Карта</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    overflow: hidden; background: #1a1a1a;
+    user-select: none; -webkit-user-select: none;
+    overscroll-behavior: none;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    color: #fff;
+  }
+  #canvas {
+    position: absolute; top: 0; left: 0;
+    width: 100%; height: 100%;
+    display: block;
+    touch-action: none;
+  }
+
+  /* ===== МИНИ-КАРТА ===== */
+  #miniMapWrap {
+    position: absolute; top: 12px; right: 12px;
+    width: 120px; height: 120px;
+    z-index: 20;
+    cursor: pointer;
+    transition: transform .2s;
+  }
+  #miniMapWrap:active { transform: scale(0.95); }
+  #miniMapCanvas {
+    width: 120px; height: 120px;
+    border-radius: 50%;
+    border: 2px solid rgba(255,255,255,0.35);
+    background: #111;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.6);
+    display: block;
+  }
+
+  /* ===== КНОПКА "В ДОРОГУ" ===== */
+  #goBtn {
+    position: absolute; bottom: 20px; left: 50%;
+    transform: translateX(-50%);
+    z-index: 18;
+    padding: 14px 28px;
+    border-radius: 30px;
+    border: none;
+    background: #2e7d32;
+    color: #fff;
+    font-size: 16px; font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+    transition: background .2s, transform .2s;
+  }
+  #goBtn:active { background: #1b5e20; transform: translateX(-50%) scale(0.96); }
+  #goBtn.hidden { display: none; }
+
+  /* Кнопка "СТОП" во время поездки */
+  #stopBtn {
+    position: absolute; bottom: 20px; left: 50%;
+    transform: translateX(-50%);
+    z-index: 18;
+    padding: 14px 28px;
+    border-radius: 30px;
+    border: none;
+    background: #c62828;
+    color: #fff;
+    font-size: 16px; font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+    display: none;
+  }
+  #stopBtn.show { display: block; }
+  #stopBtn:active { background: #8e0000; }
+
+  /* ===== МОДАЛКА ВЫБОРА МЕТКИ ===== */
+  #destOverlay {
+    position: absolute; inset: 0; z-index: 30;
+    background: rgba(0,0,0,0.6);
+    display: none; align-items: flex-end; justify-content: center;
+  }
+  #destOverlay.show { display: flex; }
+  #destPanel {
+    width: 100%; max-width: 500px;
+    background: #222;
+    border-radius: 20px 20px 0 0;
+    padding: 18px 16px calc(18px + env(safe-area-inset-bottom));
+    border-top: 1px solid rgba(255,255,255,0.12);
+    animation: slideUp .25s ease-out;
+  }
+  @keyframes slideUp {
+    from { transform: translateY(100%); }
+    to { transform: translateY(0); }
+  }
+  #destPanel h3 {
+    margin: 0 0 14px; font-size: 17px;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  #destPanel .close-x {
+    width: 32px; height: 32px; border-radius: 10px; border: none;
+    background: #444; color: #fff; font-size: 16px; cursor: pointer;
+  }
+  #destList { max-height: 50vh; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+  .dest-item {
+    padding: 14px 16px;
+    border-radius: 12px;
+    background: #2d2d2d;
+    margin-bottom: 8px;
+    display: flex; justify-content: space-between; align-items: center;
+    cursor: pointer;
+    transition: background .15s;
+  }
+  .dest-item:active { background: #3d3d3d; }
+  .dest-item.disabled { opacity: 0.4; pointer-events: none; }
+  .dest-item .name { font-size: 15px; }
+  .dest-item .dist { font-size: 12px; color: #888; }
+  .dest-item .here {
+    font-size: 11px; color: #4caf50;
+    background: rgba(76,175,80,0.15);
+    padding: 3px 8px; border-radius: 6px;
+  }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+
+<div id="miniMapWrap"><canvas id="miniMapCanvas" width="240" height="240"></canvas></div>
+
+<button id="goBtn">🚗 В дорогу</button>
+<button id="stopBtn">⏹ Остановить</button>
+
+<div id="destOverlay">
+  <div id="destPanel">
+    <h3>Куда едем? <button class="close-x" id="destClose">✕</button></h3>
+    <div id="destList"></div>
+  </div>
+</div>
+
+<script>
+(function(){
+"use strict";
+
+// ================================================================
+// ▼▼▼ ПУТИ К ФАЙЛАМ ▼▼▼
+const BG_FILE = "map_full.png";
+const DATA_FILE = "labels_routes.json";
+// ================================================================
+
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+
+let bgImage = null;
+let bgW = 2828, bgH = 2828;
+
+let scale = 1, panX = 0, panY = 0;
+
+let routes = [];
+let labels = [];
+
+let pointers = new Map();
+let isPanning = false;
+let panStart = null;
+let pinchStart = null;
+
+const MIN_SCALE = 0.1;
+const MAX_SCALE = 12;
+
+// ===== ГРАФ ДОРОГ =====
+let graph = { nodes: [], edges: [] };
+const NODE_MERGE_RADIUS = 20; // радиус соединения близких узлов
+
+// ===== МАШИНКА =====
+let car = {
+  x: 0, y: 0,
+  angle: 0,
+  speed: 80,           // world-px/сек
+  active: false,
+  path: [],            // массив {x, y}
+  pathIndex: 0,
+  segProgress: 0,      // пройдено по текущему сегменту
+  segLength: 0,
+  startLabelId: null,
+  destLabelId: null,
+  followCamera: true,
+  lastTime: 0
+};
+
+let carReady = false;
+
+// ================================================================
+// CANVAS
+// ================================================================
+function resizeCanvas(){
+  var dpr = window.devicePixelRatio || 1;
+  var w = window.innerWidth, h = window.innerHeight;
+  canvas.width = Math.floor(w * dpr);
+  canvas.height = Math.floor(h * dpr);
+  canvas.style.width = w + "px";
+  canvas.style.height = h + "px";
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  redraw();
+}
+window.addEventListener("resize", resizeCanvas);
+window.addEventListener("orientationchange", function(){ setTimeout(resizeCanvas, 200); });
+
+function w2s(x, y){ return { x: x * scale + panX, y: y * scale + panY }; }
+function s2w(x, y){ return { x: (x - panX) / scale, y: (y - panY) / scale }; }
+
+function clampScale(v){ return Math.max(MIN_SCALE, Math.min(MAX_SCALE, v)); }
+
+function fitWorld(){
+  var w = window.innerWidth, h = window.innerHeight;
+  if (bgW <= 0 || bgH <= 0){ scale = 1; panX = 0; panY = 0; return; }
+  var pad = 20;
+  var sx = (w - pad * 2) / bgW;
+  var sy = (h - pad * 2) / bgH;
+  scale = clampScale(Math.min(sx, sy));
+  panX = (w - bgW * scale) / 2;
+  panY = (h - bgH * scale) / 2;
+}
+
+// ================================================================
+// ЗАГРУЗКА
+// ================================================================
+function loadAll(){
+  fetch(DATA_FILE + "?t=" + Date.now())
+    .then(function(r){ return r.json(); })
+    .then(function(data){
+      routes = (data.routes || []).map(function(r){
+        return {
+          id: r.id,
+          color: r.color || "#00e5ff",
+          width: r.width || 4,
+          points: (r.points || []).map(function(p){ return { x: p.x, y: p.y }; })
+        };
+      });
+      labels = (data.labels || []).map(function(l){
+        return { id: l.id, name: l.name || "Метка", x: l.x, y: l.y };
+      });
+
+      if (data.worldSize && data.worldSize.w > 0 && data.worldSize.h > 0){
+        bgW = data.worldSize.w;
+        bgH = data.worldSize.h;
+      }
+
+      // Строим граф
+      buildGraph();
+      console.log("Граф построен:", graph.nodes.length, "узлов,", graph.edges.length, "рёбер");
+
+      // Инициализация машинки у "Вокзала"
+      initCar();
+
+      bgImage = new Image();
+      bgImage.onload = function(){
+        fitWorld();
+        redraw();
+        drawMiniMap();
+      };
+      bgImage.onerror = function(){
+        console.error("PNG не найден: " + BG_FILE);
+        fitWorld();
+        redraw();
+        drawMiniMap();
+      };
+      bgImage.src = BG_FILE + "?t=" + Date.now();
+    })
+    .catch(function(err){
+      console.error("JSON не найден: " + DATA_FILE, err);
+    });
+}
+
+// ================================================================
+// ПОСТРОЕНИЕ ГРАФА ДОРОГ
+// ================================================================
+function buildGraph(){
+  var nodes = [];
+  var key = function(x, y){ return Math.round(x) + "," + Math.round(y); };
+  var nodeMap = new Map();
+
+  function findNode(x, y){
+    // Ищем уже существующий узел в радиусе merge
+    for (var i = 0; i < nodes.length; i++){
+      var n = nodes[i];
+      var d = Math.hypot(n.x - x, n.y - y);
+      if (d <= NODE_MERGE_RADIUS){
+        return n;
+      }
+    }
+    return null;
+  }
+
+  function getOrCreateNode(x, y){
+    var existing = findNode(x, y);
+    if (existing) return existing;
+    var n = { id: nodes.length, x: x, y: y, edges: [] };
+    nodes.push(n);
+    return n;
+  }
+
+  // 1. Собираем все точки маршрутов как узлы
+  for (var ri = 0; ri < routes.length; ri++){
+    var r = routes[ri];
+    if (!r.points || r.points.length < 2) continue;
+    for (var pi = 0; pi < r.points.length; pi++){
+      getOrCreateNode(r.points[pi].x, r.points[pi].y);
+    }
+  }
+
+  // 2. Находим пересечения сегментов и добавляем их как узлы
+  var intersections = [];
+  for (var a = 0; a < routes.length; a++){
+    for (var b = a + 1; b < routes.length; b++){
+      var ra = routes[a], rb = routes[b];
+      if (!ra.points || !rb.points) continue;
+      for (var i = 0; i < ra.points.length - 1; i++){
+        for (var j = 0; j < rb.points.length - 1; j++){
+          var p1 = ra.points[i], p2 = ra.points[i+1];
+          var p3 = rb.points[j], p4 = rb.points[j+1];
+          var inter = segIntersect(p1, p2, p3, p4);
+          if (inter && !inter.collinear){
+            // Добавляем точку пересечения как узел
+            getOrCreateNode(inter.x, inter.y);
+          }
+        }
+      }
+    }
+  }
+
+  // 3. Соединяем узлы рёбрами: для каждого маршрута — идём по точкам
+  //    и делим сегменты вставленными пересечениями
+  var edges = [];
+  var edgeSet = new Set();
+
+  for (var ri2 = 0; ri2 < routes.length; ri2++){
+    var r2 = routes[ri2];
+    if (!r2.points || r2.points.length < 2) continue;
+
+    for (var si = 0; si < r2.points.length - 1; si++){
+      var from = r2.points[si];
+      var to = r2.points[si + 1];
+
+      // Ищем все узлы, лежащие на этом сегменте
+      var onSegment = [];
+      var totalLen = Math.hypot(to.x - from.x, to.y - from.y);
+      if (totalLen < 0.001) continue;
+
+      for (var ni = 0; ni < nodes.length; ni++){
+        var n = nodes[ni];
+        var d = distToSegment(n.x, n.y, from, to);
+        if (d.dist < 0.5){ // узел лежит на сегменте
+          onSegment.push({ node: n, t: d.t });
+        }
+      }
+
+      // Сортируем по параметру t
+      onSegment.sort(function(x, y){ return x.t - y.t; });
+
+      // Соединяем последовательные узлы
+      for (var k = 0; k < onSegment.length - 1; k++){
+        var n1 = onSegment[k].node;
+        var n2 = onSegment[k+1].node;
+        if (n1.id === n2.id) continue;
+        var key2 = Math.min(n1.id, n2.id) + "-" + Math.max(n1.id, n2.id);
+        if (edgeSet.has(key2)) continue;
+        edgeSet.add(key2);
+        var edge = {
+          a: n1, b: n2,
+          length: Math.hypot(n2.x - n1.x, n2.y - n1.y),
+          color: r2.color,
+          width: r2.width
+        };
+        edges.push(edge);
+        n1.edges.push({ node: n2, edge: edge });
+        n2.edges.push({ node: n1, edge: edge });
+      }
+    }
+  }
+
+  graph = { nodes: nodes, edges: edges };
+}
+
+// Пересечение двух отрезков
+function segIntersect(p1, p2, p3, p4){
+  var x1 = p1.x, y1 = p1.y, x2 = p2.x, y2 = p2.y;
+  var x3 = p3.x, y3 = p3.y, x4 = p4.x, y4 = p4.y;
+  var denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4);
+  if (Math.abs(denom) < 1e-9){
+    return null; // параллельны
+  }
+  var t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom;
+  var u = -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / denom;
+  if (t > 0.001 && t < 0.999 && u > 0.001 && u < 0.999){
+    return { x: x1 + t * (x2 - x1), y: y1 + t * (y2 - y1), collinear: false };
+  }
+  return null;
+}
+
+// Расстояние от точки до сегмента + параметр t
+function distToSegment(px, py, a, b){
+  var dx = b.x - a.x, dy = b.y - a.y;
+  var len2 = dx*dx + dy*dy;
+  if (len2 === 0) return { dist: Math.hypot(px - a.x, py - a.y), t: 0 };
+  var t = ((px - a.x) * dx + (py - a.y) * dy) / len2;
+  t = Math.max(0, Math.min(1, t));
+  var projX = a.x + t * dx;
+  var projY = a.y + t * dy;
+  return { dist: Math.hypot(px - projX, py - projY), t: t, x: projX, y: projY };
+}
+
+// Ближайшая точка на графе к заданной точке
+function nearestPointOnGraph(x, y){
+  var best = null;
+  var bestDist = Infinity;
+  for (var i = 0; i < graph.edges.length; i++){
+    var e = graph.edges[i];
+    var d = distToSegment(x, y, e.a, e.b);
+    if (d.dist < bestDist){
+      bestDist = d.dist;
+      best = {
+        x: d.x,
+        y: d.y,
+        edge: e,
+        t: d.t,
+        dist: d.dist
+      };
+    }
+  }
+  return best;
+}
+
+// Проекция метки на граф → создаём временный узел и ребро
+function projectLabelToGraph(label){
+  var p = nearestPointOnGraph(label.x, label.y);
+  if (!p) return null;
+
+  // Ищем существующий узел поблизости от проекции
+  for (var i = 0; i < graph.nodes.length; i++){
+    var n = graph.nodes[i];
+    if (Math.hypot(n.x - p.x, n.y - p.y) < 1){
+      return n;
+    }
+  }
+
+  // Создаём новый узел на ребре и делим ребро
+  var newNode = { id: graph.nodes.length, x: p.x, y: p.y, edges: [] };
+  graph.nodes.push(newNode);
+
+  var edge = p.edge;
+  // Удаляем старое ребро
+  var idx = graph.edges.indexOf(edge);
+  if (idx >= 0) graph.edges.splice(idx, 1);
+  edge.a.edges = edge.a.edges.filter(function(e){ return e.edge !== edge; });
+  edge.b.edges = edge.b.edges.filter(function(e){ return e.edge !== edge; });
+
+  // Создаём два новых
+  function makeEdge(n1, n2){
+    var ne = {
+      a: n1, b: n2,
+      length: Math.hypot(n2.x - n1.x, n2.y - n1.y),
+      color: edge.color, width: edge.width
+    };
+    graph.edges.push(ne);
+    n1.edges.push({ node: n2, edge: ne });
+    n2.edges.push({ node: n1, edge: ne });
+    return ne;
+  }
+  makeEdge(edge.a, newNode);
+  makeEdge(newNode, edge.b);
+
+  return newNode;
+}
+
+// ================================================================
+// ИНИЦИАЛИЗАЦИЯ МАШИНКИ У "ВОКЗАЛА"
+// ================================================================
+function initCar(){
+  // Ищем метку "Вокзал"
+  var vokzal = null;
+  for (var i = 0; i < labels.length; i++){
+    if (labels[i].name === "Вокзал"){
+      vokzal = labels[i];
+      break;
+    }
+  }
+  if (!vokzal){
+    console.warn("Метка 'Вокзал' не найдена, машинка не создана");
+    carReady = false;
+    return;
+  }
+
+  // Проекция на ближайший сегмент
+  var p = nearestPointOnGraph(vokzal.x, vokzal.y);
+  if (!p){
+    console.warn("Не удалось найти точку на графе");
+    carReady = false;
+    return;
+  }
+
+  car.x = p.x;
+  car.y = p.y;
+  car.angle = 0;
+  car.active = false;
+  car.path = [];
+  car.pathIndex = 0;
+  car.startLabelId = vokzal.id;
+  carReady = true;
+
+  console.log("Машинка стартует в:", car.x.toFixed(1), car.y.toFixed(1),
+              "(расстояние от Вокзала:", p.dist.toFixed(1), "px)");
+}
+
+// ================================================================
+// ПОИСК ПУТИ (ДЕЙКСТРА)
+// ================================================================
+function findPath(fromNode, toNode){
+  if (!fromNode || !toNode) return null;
+  if (fromNode === toNode) return [fromNode];
+
+  var dist = new Map();
+  var prev = new Map();
+  var visited = new Set();
+
+  for (var i = 0; i < graph.nodes.length; i++){
+    dist.set(graph.nodes[i].id, Infinity);
+  }
+  dist.set(fromNode.id, 0);
+
+  while (true){
+    // Находим ближайший необработанный узел
+    var current = null;
+    var currentDist = Infinity;
+    for (var j = 0; j < graph.nodes.length; j++){
+      var n = graph.nodes[j];
+      if (visited.has(n.id)) continue;
+      var d = dist.get(n.id);
+      if (d < currentDist){
+        currentDist = d;
+        current = n;
+      }
+    }
+    if (!current) break;
+    if (current === toNode) break;
+
+    visited.add(current.id);
+
+    for (var k = 0; k < current.edges.length; k++){
+      var e = current.edges[k];
+      var neighbor = e.node;
+      if (visited.has(neighbor.id)) continue;
+      var newDist = currentDist + e.edge.length;
+      if (newDist < dist.get(neighbor.id)){
+        dist.set(neighbor.id, newDist);
+        prev.set(neighbor.id, current);
+      }
+    }
+  }
+
+  if (!prev.has(toNode.id) && fromNode !== toNode) return null;
+
+  // Восстанавливаем путь
+  var path = [];
+  var cur = toNode;
+  while (cur){
+    path.unshift(cur);
+    if (cur === fromNode) break;
+    cur = prev.get(cur.id);
+    if (!cur) return null;
+  }
+  return path;
+}
+
+// ================================================================
+// ЗАПУСК ДВИЖЕНИЯ
+// ================================================================
+function startTrip(destLabel){
+  if (!carReady){
+    alert("Машинка не готова: метка 'Вокзал' не найдена или граф пуст");
+    return;
+  }
+
+  // Привязываем стартовую позицию машинки к графу
+  var startNode = projectLabelToGraph({ x: car.x, y: car.y, name: "_car_start" });
+  if (!startNode) startNode = nearestNodeTo(car.x, car.y);
+
+  // Привязываем точку назначения
+  var endNode = projectLabelToGraph(destLabel);
+  if (!endNode) endNode = nearestNodeTo(destLabel.x, destLabel.y);
+
+  if (!startNode || !endNode){
+    alert("Не удалось привязать точки к графу");
+    return;
+  }
+
+  var nodePath = findPath(startNode, endNode);
+  if (!nodePath){
+    alert("Не удалось найти путь по дорогам. Возможно, метки на разных дорогах.");
+    return;
+  }
+
+  // Превращаем путь узлов в путь точек
+  car.path = nodePath.map(function(n){ return { x: n.x, y: n.y }; });
+  car.pathIndex = 0;
+  car.segProgress = 0;
+  car.segLength = 0;
+  car.active = true;
+  car.destLabelId = destLabel.id;
+  car.lastTime = performance.now();
+
+  // Поворачиваем к первому сегменту
+  if (car.path.length >= 2){
+    var dx = car.path[1].x - car.path[0].x;
+    var dy = car.path[1].y - car.path[0].y;
+    car.angle = Math.atan2(dy, dx);
+    car.segLength = Math.hypot(dx, dy);
+  }
+
+  document.getElementById("goBtn").classList.add("hidden");
+  document.getElementById("stopBtn").classList.add("show");
+
+  requestAnimationFrame(tick);
+}
+
+function nearestNodeTo(x, y){
+  var best = null, bestDist = Infinity;
+  for (var i = 0; i < graph.nodes.length; i++){
+    var n = graph.nodes[i];
+    var d = Math.hypot(n.x - x, n.y - y);
+    if (d < bestDist){ bestDist = d; best = n; }
+  }
+  return best;
+}
+
+// ================================================================
+// АНИМАЦИЯ ДВИЖЕНИЯ
+// ================================================================
+function tick(now){
+  if (!car.active) return;
+
+  var dt = Math.min(0.1, (now - car.lastTime) / 1000);
+  car.lastTime = now;
+
+  if (car.pathIndex >= car.path.length - 1){
+    // Приехали
+    car.active = false;
+    document.getElementById("goBtn").classList.remove("hidden");
+    document.getElementById("stopBtn").classList.remove("show");
+    redraw();
+    drawMiniMap();
+    return;
+  }
+
+  var step = car.speed * dt;
+  car.segProgress += step;
+
+  while (car.segProgress >= car.segLength && car.pathIndex < car.path.length - 1){
+    car.segProgress -= car.segLength;
+    car.pathIndex++;
+    if (car.pathIndex >= car.path.length - 1) break;
+    var p1 = car.path[car.pathIndex];
+    var p2 = car.path[car.pathIndex + 1];
+    car.segLength = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+    car.angle = Math.atan2(p2.y - p1.y, p2.x - p1.x);
+  }
+
+  if (car.pathIndex < car.path.length - 1){
+    var a = car.path[car.pathIndex];
+    var b = car.path[car.pathIndex + 1];
+    var t = car.segLength > 0 ? car.segProgress / car.segLength : 0;
+    car.x = a.x + (b.x - a.x) * t;
+    car.y = a.y + (b.y - a.y) * t;
+  }
+
+  // Камера следует за машинкой
+  if (car.followCamera){
+    var w = window.innerWidth, h = window.innerHeight;
+    panX = w / 2 - car.x * scale;
+    panY = h / 2 - car.y * scale;
+  }
+
+  redraw();
+  drawMiniMap();
+  requestAnimationFrame(tick);
+}
+
+function stopTrip(){
+  car.active = false;
+  car.path = [];
+  document.getElementById("goBtn").classList.remove("hidden");
+  document.getElementById("stopBtn").classList.remove("show");
+  redraw();
+  drawMiniMap();
+}
+
+// ================================================================
+// ОТРИСОВКА
+// ================================================================
+function redraw(){
+  var w = window.innerWidth, h = window.innerHeight;
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = "#1a1a1a";
+  ctx.fillRect(0, 0, w, h);
+
+  if (bgImage && bgImage.complete){
+    var srcX = Math.max(0, (0 - panX) / scale);
+    var srcY = Math.max(0, (0 - panY) / scale);
+    var srcW = Math.min(bgW - srcX, w / scale);
+    var srcH = Math.min(bgH - srcY, h / scale);
+    if (srcW > 0 && srcH > 0){
+      ctx.save();
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+      ctx.drawImage(
+        bgImage,
+        srcX, srcY, srcW, srcH,
+        panX + srcX * scale, panY + srcY * scale,
+        srcW * scale, srcH * scale
+      );
+      ctx.restore();
+    }
+  }
+
+  // Маршруты
+  ctx.save();
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  for (var i = 0; i < routes.length; i++){
+    var r = routes[i];
+    if (!r.points || r.points.length < 2) continue;
+    var pts = r.points.map(function(p){ return w2s(p.x, p.y); });
+    ctx.strokeStyle = "rgba(0,229,255,0.55)";
+    ctx.lineWidth = Math.max(1, r.width * scale * 0.4);
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    for (var j = 1; j < pts.length; j++) ctx.lineTo(pts[j].x, pts[j].y);
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  // Метки
+  for (var k = 0; k < labels.length; k++){
+    var lb = labels[k];
+    var s = w2s(lb.x, lb.y);
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, 8, 0, Math.PI * 2);
+    ctx.fillStyle = "#f44336";
+    ctx.fill();
+    ctx.strokeStyle = "#fff";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    ctx.font = "12px sans-serif";
+    var textW = ctx.measureText(lb.name).width;
+    var pad = 6;
+    var bx = s.x + 12, by = s.y - 10;
+    var rw = textW + pad * 2, rh = 20;
+    ctx.fillStyle = "rgba(0,0,0,0.75)";
+    ctx.beginPath();
+    ctx.moveTo(bx + 6, by);
+    ctx.arcTo(bx + rw, by, bx + rw, by + rh, 6);
+    ctx.arcTo(bx + rw, by + rh, bx, by + rh, 6);
+    ctx.arcTo(bx, by + rh, bx, by, 6);
+    ctx.arcTo(bx, by, bx + rw, by, 6);
+    ctx.fill();
+    ctx.fillStyle = "#fff";
+    ctx.textBaseline = "middle";
+    ctx.fillText(lb.name, bx + pad, by + rh / 2);
+  }
+
+  // Оставшийся путь (подсветка)
+  if (car.active && car.path.length >= 2){
+    ctx.save();
+    ctx.strokeStyle = "rgba(76,175,80,0.7)";
+    ctx.lineWidth = Math.max(2, 4 * scale * 0.4);
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    var first = true;
+    for (var pi = car.pathIndex; pi < car.path.length; pi++){
+      var sp = w2s(car.path[pi].x, car.path[pi].y);
+      if (first){ ctx.moveTo(sp.x, sp.y); first = false; }
+      else ctx.lineTo(sp.x, sp.y);
+    }
+    // Начинаем с текущей позиции машинки
+    var carSp = w2s(car.x, car.y);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // Машинка
+  if (carReady){
+    drawCar();
+  }
+}
+
+function drawCar(){
+  var s = w2s(car.x, car.y);
+  ctx.save();
+  ctx.translate(s.x, s.y);
+  ctx.rotate(car.angle + Math.PI / 2); // emoji 🚗 смотрит вверх
+
+  // Тень
+  ctx.beginPath();
+  ctx.arc(0, 0, 14, 0, Math.PI * 2);
+  ctx.fillStyle = "rgba(0,0,0,0.35)";
+  ctx.fill();
+
+  ctx.font = "26px sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("🚗", 0, 0);
+
+  ctx.restore();
+}
+
+// ================================================================
+// МИНИ-КАРТА
+// ================================================================
+var miniCanvas = document.getElementById("miniMapCanvas");
+var miniCtx = miniCanvas.getContext("2d");
+var MINI_SIZE = 240; // внутренний размер (учитываем DPR вручную)
+
+function drawMiniMap(){
+  var w = MINI_SIZE, h = MINI_SIZE;
+  miniCtx.clearRect(0, 0, w, h);
+
+  miniCtx.fillStyle = "#111";
+  miniCtx.fillRect(0, 0, w, h);
+
+  if (bgW <= 0 || bgH <= 0) return;
+
+  var pad = 10;
+  var miniScale = Math.min((w - pad * 2) / bgW, (h - pad * 2) / bgH);
+  var miniPanX = (w - bgW * miniScale) / 2;
+  var miniPanY = (h - bgH * miniScale) / 2;
+
+  // Фон
+  if (bgImage && bgImage.complete){
+    miniCtx.save();
+    miniCtx.globalAlpha = 0.7;
+    miniCtx.drawImage(bgImage, miniPanX, miniPanY, bgW * miniScale, bgH * miniScale);
+    miniCtx.restore();
+  }
+
+  // Маршруты
+  miniCtx.save();
+  miniCtx.strokeStyle = "rgba(0,229,255,0.7)";
+  miniCtx.lineWidth = 1;
+  miniCtx.lineCap = "round";
+  miniCtx.lineJoin = "round";
+  for (var i = 0; i < routes.length; i++){
+    var r = routes[i];
+    if (!r.points || r.points.length < 2) continue;
+    miniCtx.beginPath();
+    miniCtx.moveTo(miniPanX + r.points[0].x * miniScale, miniPanY + r.points[0].y * miniScale);
+    for (var j = 1; j < r.points.length; j++){
+      miniCtx.lineTo(miniPanX + r.points[j].x * miniScale, miniPanY + r.points[j].y * miniScale);
+    }
+    miniCtx.stroke();
+  }
+  miniCtx.restore();
+
+  // Метки
+  for (var k = 0; k < labels.length; k++){
+    var lb = labels[k];
+    var lx = miniPanX + lb.x * miniScale;
+    var ly = miniPanY + lb.y * miniScale;
+    miniCtx.beginPath();
+    miniCtx.arc(lx, ly, 3, 0, Math.PI * 2);
+    miniCtx.fillStyle = "#f44336";
+    miniCtx.fill();
+  }
+
+  // Машинка
+  if (carReady){
+    var cx = miniPanX + car.x * miniScale;
+    var cy = miniPanY + car.y * miniScale;
+    miniCtx.beginPath();
+    miniCtx.arc(cx, cy, 5, 0, Math.PI * 2);
+    miniCtx.fillStyle = "#4caf50";
+    miniCtx.fill();
+    miniCtx.strokeStyle = "#fff";
+    miniCtx.lineWidth = 2;
+    miniCtx.stroke();
+  }
+
+  // Рамка текущего вида
+  var viewW = window.innerWidth / scale;
+  var viewH = window.innerHeight / scale;
+  var viewX = -panX / scale;
+  var viewY = -panY / scale;
+  miniCtx.save();
+  miniCtx.strokeStyle = "rgba(255,255,255,0.9)";
+  miniCtx.lineWidth = 2;
+  miniCtx.strokeRect(
+    miniPanX + viewX * miniScale,
+    miniPanY + viewY * miniScale,
+    viewW * miniScale,
+    viewH * miniScale
+  );
+  miniCtx.restore();
+}
+
+// ================================================================
+// УПРАВЛЕНИЕ (PAN, ZOOM)
+// ================================================================
+canvas.addEventListener("pointerdown", function(e){
+  canvas.setPointerCapture(e.pointerId);
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (pointers.size === 1){
+    isPanning = true;
+    panStart = { x: e.clientX, y: e.clientY, panX: panX, panY: panY };
+  } else if (pointers.size === 2){
+    isPanning = false;
+    startPinch();
+  }
+});
+
+canvas.addEventListener("pointermove", function(e){
+  if (!pointers.has(e.pointerId)) return;
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (pointers.size === 1 && isPanning && panStart){
+    var dx = e.clientX - panStart.x;
+    var dy = e.clientY - panStart.y;
+    panX = panStart.panX + dx;
+    panY = panStart.panY + dy;
+    redraw();
+    drawMiniMap();
+    return;
+  }
+  if (pointers.size === 2 && pinchStart){
+    updatePinch();
+    return;
+  }
+});
+
+canvas.addEventListener("pointerup", function(e){
+  pointers.delete(e.pointerId);
+  if (pointers.size === 0){
+    isPanning = false;
+    panStart = null;
+    pinchStart = null;
+  } else if (pointers.size === 1){
+    pinchStart = null;
+    isPanning = true;
+    var p = pointers.values().next().value;
+    panStart = { x: p.x, y: p.y, panX: panX, panY: panY };
+  }
+});
+
+canvas.addEventListener("pointercancel", function(e){
+  pointers.delete(e.pointerId);
+  if (pointers.size === 0){
+    isPanning = false;
+    panStart = null;
+    pinchStart = null;
+  }
+});
+
+function startPinch(){
+  var arr = Array.from(pointers.values());
+  var dx = arr[0].x - arr[1].x;
+  var dy = arr[0].y - arr[1].y;
+  var dist = Math.hypot(dx, dy);
+  var midX = (arr[0].x + arr[1].x) / 2;
+  var midY = (arr[0].y + arr[1].y) / 2;
+  pinchStart = {
+    dist: dist, scale: scale, midX: midX, midY: midY,
+    worldMid: s2w(midX, midY)
+  };
+}
+
+function updatePinch(){
+  var arr = Array.from(pointers.values());
+  var dx = arr[0].x - arr[1].x;
+  var dy = arr[0].y - arr[1].y;
+  var dist = Math.hypot(dx, dy);
+  var midX = (arr[0].x + arr[1].x) / 2;
+  var midY = (arr[0].y + arr[1].y) / 2;
+  var factor = dist / pinchStart.dist;
+  var newScale = clampScale(pinchStart.scale * factor);
+  panX = midX - pinchStart.worldMid.x * newScale;
+  panY = midY - pinchStart.worldMid.y * newScale;
+  scale = newScale;
+  redraw();
+  drawMiniMap();
+}
+
+canvas.addEventListener("wheel", function(e){
+  e.preventDefault();
+  var factor = e.deltaY < 0 ? 1.1 : 0.9;
+  var newScale = clampScale(scale * factor);
+  var rect = canvas.getBoundingClientRect();
+  var mx = e.clientX - rect.left;
+  var my = e.clientY - rect.top;
+  var world = s2w(mx, my);
+  panX = mx - world.x * newScale;
+  panY = my - world.y * newScale;
+  scale = newScale;
+  redraw();
+  drawMiniMap();
+}, { passive: false });
+
+var lastTapTime = 0;
+var lastTapX = 0, lastTapY = 0;
+canvas.addEventListener("pointerup", function(e){
+  var now = performance.now();
+  var dt = now - lastTapTime;
+  var dist = Math.hypot(e.clientX - lastTapX, e.clientY - lastTapY);
+  if (dt < 300 && dist < 20){
+    fitWorld();
+    redraw();
+    drawMiniMap();
+    lastTapTime = 0;
+    return;
+  }
+  lastTapTime = now;
+  lastTapX = e.clientX;
+  lastTapY = e.clientY;
+});
+
+// ================================================================
+// ТАП ПО МИНИ-КАРТЕ → ПОЛНЫЙ ВИД
+// ================================================================
+document.getElementById("miniMapWrap").addEventListener("click", function(e){
+  e.stopPropagation();
+  // Плавная анимация к полному виду
+  var startScale = scale;
+  var startPanX = panX;
+  var startPanY = panY;
+
+  // Целевой вид
+  var w = window.innerWidth, h = window.innerHeight;
+  var pad = 20;
+  var sx = (w - pad * 2) / bgW;
+  var sy = (h - pad * 2) / bgH;
+  var targetScale = clampScale(Math.min(sx, sy));
+  var targetPanX = (w - bgW * targetScale) / 2;
+  var targetPanY = (h - bgH * targetScale) / 2;
+
+  var start = performance.now();
+  var duration = 400;
+
+  function animate(){
+    var t = Math.min(1, (performance.now() - start) / duration);
+    var ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+
+    scale = startScale + (targetScale - startScale) * ease;
+    panX = startPanX + (targetPanX - startPanX) * ease;
+    panY = startPanY + (targetPanY - startPanY) * ease;
+
+    redraw();
+    drawMiniMap();
+
+    if (t < 1) requestAnimationFrame(animate);
+  }
+  requestAnimationFrame(animate);
+});
+
+// ================================================================
+// МОДАЛКА "КУДА ЕДЕМ"
+// ================================================================
+var destOverlay = document.getElementById("destOverlay");
+var destList = document.getElementById("destList");
+
+document.getElementById("goBtn").addEventListener("click", function(){
+  openDestModal();
+});
+
+document.getElementById("destClose").addEventListener("click", function(){
+  destOverlay.classList.remove("show");
+});
+
+destOverlay.addEventListener("click", function(e){
+  if (e.target === destOverlay){
+    destOverlay.classList.remove("show");
+  }
+});
+
+function openDestModal(){
+  destList.innerHTML = "";
+
+  // Считаем расстояния от машинки до каждой метки
+  var items = labels.map(function(lb){
+    var dist = Math.hypot(lb.x - car.x, lb.y - car.y);
+    return { label: lb, dist: dist };
+  });
+  items.sort(function(a, b){ return a.dist - b.dist; });
+
+  items.forEach(function(item){
+    var lb = item.label;
+    var el = document.createElement("div");
+    el.className = "dest-item";
+
+    var isHere = (lb.id === car.startLabelId);
+    if (isHere) el.classList.add("disabled");
+
+    var nameEl = document.createElement("div");
+    nameEl.className = "name";
+    nameEl.textContent = lb.name;
+
+    var rightEl = document.createElement("div");
+    if (isHere){
+      rightEl.innerHTML = '<span class="here">Вы здесь</span>';
+    } else {
+      rightEl.className = "dist";
+      rightEl.textContent = Math.round(item.dist) + " px";
+    }
+
+    el.appendChild(nameEl);
+    el.appendChild(rightEl);
+
+    el.addEventListener("click", function(){
+      destOverlay.classList.remove("show");
+      startTrip(lb);
+    });
+
+    destList.appendChild(el);
+  });
+
+  destOverlay.classList.add("show");
+}
+
+// ================================================================
+// СТОП
+// ================================================================
+document.getElementById("stopBtn").addEventListener("click", stopTrip);
+
+// ================================================================
+// СТАРТ
+// ================================================================
+resizeCanvas();
+loadAll();
+
+})();
+</script>
+</body>
+</html>
