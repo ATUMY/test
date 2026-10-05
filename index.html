@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>Карта</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    overflow: hidden; background: #1a1a1a;
+    user-select: none; -webkit-user-select: none;
+    overscroll-behavior: none;
+  }
+  #canvas {
+    position: absolute; top: 0; left: 0;
+    width: 100%; height: 100%;
+    display: block;
+    touch-action: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<script>
+(function(){
+"use strict";
+
+// ================================================================
+// ▼▼▼ ПУТЬ К PNG ▼▼▼
+const BG_FILE = "map_full.png";
+// ================================================================
+const DATA_FILE = "labels_routes.json";
+
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+
+let bgImage = null;
+let bgW = 2828, bgH = 2828;
+
+let scale = 1, panX = 0, panY = 0;
+
+let routes = [];
+let labels = [];
+
+let pointers = new Map();
+let isPanning = false;
+let panStart = null;
+let pinchStart = null;
+
+const MIN_SCALE = 0.1;
+const MAX_SCALE = 12;
+
+function resizeCanvas(){
+  var dpr = window.devicePixelRatio || 1;
+  var w = window.innerWidth, h = window.innerHeight;
+  canvas.width = Math.floor(w * dpr);
+  canvas.height = Math.floor(h * dpr);
+  canvas.style.width = w + "px";
+  canvas.style.height = h + "px";
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  redraw();
+}
+window.addEventListener("resize", resizeCanvas);
+window.addEventListener("orientationchange", function(){ setTimeout(resizeCanvas, 200); });
+
+function w2s(x, y){ return { x: x * scale + panX, y: y * scale + panY }; }
+function s2w(x, y){ return { x: (x - panX) / scale, y: (y - panY) / scale }; }
+
+function clampScale(v){
+  return Math.max(MIN_SCALE, Math.min(MAX_SCALE, v));
+}
+
+function fitWorld(){
+  var w = window.innerWidth, h = window.innerHeight;
+  if (bgW <= 0 || bgH <= 0){ scale = 1; panX = 0; panY = 0; return; }
+  var pad = 20;
+  var sx = (w - pad * 2) / bgW;
+  var sy = (h - pad * 2) / bgH;
+  scale = clampScale(Math.min(sx, sy));
+  panX = (w - bgW * scale) / 2;
+  panY = (h - bgH * scale) / 2;
+}
+
+function loadAll(){
+  fetch(DATA_FILE + "?t=" + Date.now())
+    .then(function(r){ return r.json(); })
+    .then(function(data){
+      routes = (data.routes || []).map(function(r){
+        return {
+          id: r.id, color: r.color || "#00e5ff",
+          width: r.width || 4,
+          points: (r.points || []).map(function(p){ return { x: p.x, y: p.y }; })
+        };
+      });
+      labels = (data.labels || []).map(function(l){
+        return {
+          id: l.id, name: l.name || "Метка",
+          x: l.x, y: l.y
+        };
+      });
+
+      if (data.worldSize && data.worldSize.w > 0 && data.worldSize.h > 0){
+        bgW = data.worldSize.w;
+        bgH = data.worldSize.h;
+      }
+
+      bgImage = new Image();
+      bgImage.onload = function(){
+        fitWorld();
+        redraw();
+      };
+      bgImage.onerror = function(){
+        console.error("PNG не найден: " + BG_FILE);
+      };
+      bgImage.src = BG_FILE + "?t=" + Date.now();
+    })
+    .catch(function(err){
+      console.error("JSON не найден: " + DATA_FILE, err);
+    });
+}
+
+function redraw(){
+  var w = window.innerWidth, h = window.innerHeight;
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = "#1a1a1a";
+  ctx.fillRect(0, 0, w, h);
+
+  if (bgImage && bgImage.complete){
+    var srcX = Math.max(0, (0 - panX) / scale);
+    var srcY = Math.max(0, (0 - panY) / scale);
+    var srcW = Math.min(bgW - srcX, w / scale);
+    var srcH = Math.min(bgH - srcY, h / scale);
+    if (srcW > 0 && srcH > 0){
+      ctx.save();
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+      ctx.drawImage(
+        bgImage,
+        srcX, srcY, srcW, srcH,
+        panX + srcX * scale, panY + srcY * scale,
+        srcW * scale, srcH * scale
+      );
+      ctx.restore();
+    }
+  }
+
+  ctx.save();
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  for (var i = 0; i < routes.length; i++){
+    var r = routes[i];
+    if (!r.points || r.points.length < 2) continue;
+    var pts = r.points.map(function(p){ return w2s(p.x, p.y); });
+    ctx.strokeStyle = "rgba(0,229,255,0.55)";
+    ctx.lineWidth = Math.max(1, r.width * scale * 0.4);
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    for (var j = 1; j < pts.length; j++) ctx.lineTo(pts[j].x, pts[j].y);
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  for (var k = 0; k < labels.length; k++){
+    var lb = labels[k];
+    var s = w2s(lb.x, lb.y);
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, 8, 0, Math.PI * 2);
+    ctx.fillStyle = "#f44336";
+    ctx.fill();
+    ctx.strokeStyle = "#fff";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    ctx.font = "12px sans-serif";
+    var textW = ctx.measureText(lb.name).width;
+    var pad = 6;
+    var bx = s.x + 12, by = s.y - 10;
+    var rw = textW + pad * 2, rh = 20;
+    ctx.fillStyle = "rgba(0,0,0,0.75)";
+    ctx.beginPath();
+    ctx.moveTo(bx + 6, by);
+    ctx.arcTo(bx + rw, by, bx + rw, by + rh, 6);
+    ctx.arcTo(bx + rw, by + rh, bx, by + rh, 6);
+    ctx.arcTo(bx, by + rh, bx, by, 6);
+    ctx.arcTo(bx, by, bx + rw, by, 6);
+    ctx.fill();
+    ctx.fillStyle = "#fff";
+    ctx.textBaseline = "middle";
+    ctx.fillText(lb.name, bx + pad, by + rh / 2);
+  }
+}
+
+canvas.addEventListener("pointerdown", function(e){
+  canvas.setPointerCapture(e.pointerId);
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (pointers.size === 1){
+    isPanning = true;
+    panStart = { x: e.clientX, y: e.clientY, panX: panX, panY: panY };
+  } else if (pointers.size === 2){
+    isPanning = false;
+    startPinch();
+  }
+});
+
+canvas.addEventListener("pointermove", function(e){
+  if (!pointers.has(e.pointerId)) return;
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (pointers.size === 1 && isPanning && panStart){
+    var dx = e.clientX - panStart.x;
+    var dy = e.clientY - panStart.y;
+    panX = panStart.panX + dx;
+    panY = panStart.panY + dy;
+    redraw();
+    return;
+  }
+  if (pointers.size === 2 && pinchStart){
+    updatePinch();
+    return;
+  }
+});
+
+canvas.addEventListener("pointerup", function(e){
+  pointers.delete(e.pointerId);
+  if (pointers.size === 0){
+    isPanning = false;
+    panStart = null;
+    pinchStart = null;
+  } else if (pointers.size === 1){
+    pinchStart = null;
+    isPanning = true;
+    var p = pointers.values().next().value;
+    panStart = { x: p.x, y: p.y, panX: panX, panY: panY };
+  }
+});
+
+canvas.addEventListener("pointercancel", function(e){
+  pointers.delete(e.pointerId);
+  if (pointers.size === 0){
+    isPanning = false;
+    panStart = null;
+    pinchStart = null;
+  }
+});
+
+function startPinch(){
+  var arr = Array.from(pointers.values());
+  var dx = arr[0].x - arr[1].x;
+  var dy = arr[0].y - arr[1].y;
+  var dist = Math.hypot(dx, dy);
+  var midX = (arr[0].x + arr[1].x) / 2;
+  var midY = (arr[0].y + arr[1].y) / 2;
+  pinchStart = {
+    dist: dist,
+    scale: scale,
+    midX: midX,
+    midY: midY,
+    worldMid: s2w(midX, midY)
+  };
+}
+
+function updatePinch(){
+  var arr = Array.from(pointers.values());
+  var dx = arr[0].x - arr[1].x;
+  var dy = arr[0].y - arr[1].y;
+  var dist = Math.hypot(dx, dy);
+  var midX = (arr[0].x + arr[1].x) / 2;
+  var midY = (arr[0].y + arr[1].y) / 2;
+  var factor = dist / pinchStart.dist;
+  var newScale = clampScale(pinchStart.scale * factor);
+  panX = midX - pinchStart.worldMid.x * newScale;
+  panY = midY - pinchStart.worldMid.y * newScale;
+  scale = newScale;
+  redraw();
+}
+
+canvas.addEventListener("wheel", function(e){
+  e.preventDefault();
+  var factor = e.deltaY < 0 ? 1.1 : 0.9;
+  var newScale = clampScale(scale * factor);
+  var rect = canvas.getBoundingClientRect();
+  var mx = e.clientX - rect.left;
+  var my = e.clientY - rect.top;
+  var world = s2w(mx, my);
+  panX = mx - world.x * newScale;
+  panY = my - world.y * newScale;
+  scale = newScale;
+  redraw();
+}, { passive: false });
+
+var lastTapTime = 0;
+var lastTapX = 0, lastTapY = 0;
+canvas.addEventListener("pointerup", function(e){
+  var now = performance.now();
+  var dt = now - lastTapTime;
+  var dist = Math.hypot(e.clientX - lastTapX, e.clientY - lastTapY);
+  if (dt < 300 && dist < 20){
+    fitWorld();
+    redraw();
+    lastTapTime = 0;
+    return;
+  }
+  lastTapTime = now;
+  lastTapX = e.clientX;
+  lastTapY = e.clientY;
+});
+
+resizeCanvas();
+loadAll();
+
+})();
+</script>
+</body>
+</html>
